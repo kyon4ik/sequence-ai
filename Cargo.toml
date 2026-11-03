@@ -7,3 +7,4 @@ edition = "2024"
 arrayvec = "0.7.8"
 rand = "0.10.3"
 rand_xoshiro = "0.8.1"
+strum = { version = "0.28.0", features = ["derive"] }
