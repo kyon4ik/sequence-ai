@@ -4,7 +4,7 @@ use arrayvec::ArrayVec;
 use rand::rngs::SmallRng;
 use rand::seq::IndexedRandom;
 use rand::{RngExt, SeedableRng};
-use sequence::{Action, Board, NoJacksGame, Observation};
+use sequence_core::{Action, Board, GameOutcome, NoJacksGame, Observation};
 
 trait Bot {
     fn choose_action<'a>(&mut self, obs: Observation<'a>, actions: &[Action]) -> Action;
@@ -105,7 +105,7 @@ fn main() {
 
 fn run_games(seed: u64, n_games: usize, bot_kinds: [BotKind; 2], bot_seeds: [u64; 2]) {
     let mut game_rng = SmallRng::seed_from_u64(seed);
-    let mut legal_actions = Vec::with_capacity(sequence::MAX_LEGAL_ACTIONS);
+    let mut legal_actions = Vec::with_capacity(sequence_core::MAX_LEGAL_ACTIONS);
 
     let timer = Instant::now();
 
@@ -128,9 +128,9 @@ fn run_games(seed: u64, n_games: usize, bot_kinds: [BotKind; 2], bot_seeds: [u64
         }
 
         match game.outcome() {
-            sequence::GameOutcome::Unknown => unreachable!(),
-            sequence::GameOutcome::Won(color) => wins[color as usize] += 1,
-            sequence::GameOutcome::Draw => draws += 1,
+            GameOutcome::Unknown => unreachable!(),
+            GameOutcome::Won(color) => wins[color as usize] += 1,
+            GameOutcome::Draw => draws += 1,
         }
     }
 
