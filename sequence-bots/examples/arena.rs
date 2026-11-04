@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-use arrayvec::ArrayVec;
 use rand::rngs::SmallRng;
 use rand::seq::IndexedRandom;
 use rand::{RngExt, SeedableRng};
@@ -114,9 +113,10 @@ fn run_games(seed: u64, n_games: usize, bot_kinds: [BotKind; 2], bot_seeds: [u64
 
     for _ in 0..n_games {
         let mut game = NoJacksGame::from_seed(game_rng.random());
-        let mut bots: ArrayVec<_, 2> = core::iter::zip(bot_kinds, bot_seeds)
-            .map(|(kind, seed)| kind.create(seed))
-            .collect();
+        let mut bots = [
+            bot_kinds[0].create(bot_seeds[0]),
+            bot_kinds[1].create(bot_seeds[1]),
+        ];
 
         while !game.is_game_over() {
             let bot_index = game.us() as usize;

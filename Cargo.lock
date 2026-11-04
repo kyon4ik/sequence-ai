@@ -109,6 +109,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sequence-bots"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "sequence-core",
+]
+
+[[package]]
 name = "sequence-core"
 version = "0.1.0"
 dependencies = [
