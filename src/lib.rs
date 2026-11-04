@@ -6,7 +6,7 @@ mod game;
 
 pub use board::{Board, BoardMask, Color, Position};
 pub use card::{Card, CardRank, CardSuit};
-pub use game::{Action, GameOutcome, MAX_LEGAL_ACTIONS, NoJacksGame};
+pub use game::{Action, GameOutcome, MAX_LEGAL_ACTIONS, NoJacksGame, Observation};
 
 // impl Game {
 // pub const MAX_TURN_COUNT: usize = 300;

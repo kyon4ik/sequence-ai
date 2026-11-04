@@ -23,6 +23,15 @@ pub struct NoJacksGame {
     draw_pile: Vec<Card>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Observation<'a> {
+    pub board: &'a Board,
+    pub turns: u16,
+    pub color: Color,
+    pub sequences: [u8; 2],
+    pub hand: &'a [Card],
+}
+
 impl Default for NoJacksGame {
     fn default() -> Self {
         let seed = rand::random();
@@ -31,6 +40,16 @@ impl Default for NoJacksGame {
 }
 
 impl NoJacksGame {
+    pub fn observation(&self) -> Observation<'_> {
+        Observation {
+            board: &self.board,
+            turns: self.turns,
+            color: self.color,
+            sequences: self.sequences,
+            hand: self.our_hand(),
+        }
+    }
+
     pub fn from_seed(seed: u64) -> Self {
         let mut rng = Xoroshiro128PlusPlus::seed_from_u64(seed);
 

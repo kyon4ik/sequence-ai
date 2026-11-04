@@ -161,7 +161,7 @@ impl Board {
     pub const SEQ_MASK: u8 = 1 << 2;
     pub const PROT_MASK: u8 = 1 << 3;
 
-    const DIRS: [(i8, i8); 4] = [(0, 1), (1, 0), (1, 1), (-1, 1)];
+    pub const DIRS: [(i8, i8); 4] = [(0, 1), (1, 0), (1, 1), (-1, 1)];
 
     pub fn empty() -> Self {
         let masks = [0u8; 50];
@@ -282,6 +282,33 @@ impl Board {
             }
         }
         sequences
+    }
+
+    pub fn scan_direction(&self, dy: i8, dx: i8, our_mask: u8, num_runs: &mut [i32; 6]) {
+        for start in PositionIter::new() {
+            if start.offset(-dy, -dx).is_ok() {
+                continue;
+            }
+
+            let mut position = Ok(start);
+            let mut run: usize = 0;
+
+            while let Ok(p) = position {
+                if self.get(p, our_mask) == our_mask {
+                    run += 1;
+                } else if run > 0 {
+                    num_runs[run.min(5)] += 1;
+                    run = 0;
+                }
+
+                position = p.offset(dy, dx);
+            }
+
+            // Flush a run that reaches the board edge.
+            if run > 0 {
+                num_runs[run.min(5)] += 1;
+            }
+        }
     }
 }
 
