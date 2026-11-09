@@ -4,6 +4,7 @@ mod board;
 mod card;
 mod game;
 
+pub use board::get_card;
 pub use board::{Board, BoardMask, Color, Position};
 pub use card::{Card, CardRank, CardSuit};
 pub use game::{Action, GameOutcome, MAX_LEGAL_ACTIONS, NoJacksGame, Observation};

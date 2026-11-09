@@ -4,5 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+burn = { version = "=0.22.1", optional = true, default-features = false, features = ["std", "flex", "cuda", "autodiff", "optim"] }
 rand = "0.10.3"
 sequence-core = { path = "../sequence-core" } 
+
+[features]
+burn = ["dep:burn"]
+
+[[example]]
+name = "train_mc"
+required-features = ["burn"]
