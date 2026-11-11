@@ -1,0 +1,131 @@
+use std::path::Path;
+
+use anyhow::Result;
+use sequence_agent::InferenceDevice;
+
+use crate::artifacts::Store;
+
+#[cfg(feature = "burn")]
+mod enabled {
+    use super::*;
+    use crate::{
+        artifacts::{read_toml, write_json},
+        parse_device, validate_id,
+    };
+    use anyhow::{Context, anyhow};
+    use burn::prelude::*;
+    use sequence_agent::{AgentConfig, AgentDescriptor, AgentSpec, mc::ValueNet};
+    use sequence_training::mc::{TrainingConfig, train_with_progress};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Algorithm {
+        Mc,
+    }
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Experiment {
+        algorithm: Algorithm,
+        id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default = "cpu")]
+        device: String,
+        #[serde(default)]
+        training: TrainingConfig,
+    }
+
+    fn cpu() -> String {
+        "cpu".into()
+    }
+
+    pub fn run(
+        store: &Store,
+        path: &Path,
+        id: Option<String>,
+        device: Option<InferenceDevice>,
+    ) -> Result<()> {
+        let mut experiment: Experiment = read_toml(path)?;
+        if let Some(id) = id {
+            experiment.id = id;
+        }
+        validate_id(&experiment.id)?;
+        experiment.training.validate().map_err(|e| anyhow!("{e}"))?;
+        let device = device
+            .map(Ok)
+            .unwrap_or_else(|| parse_device(&experiment.device))
+            .map_err(anyhow::Error::msg)?;
+        experiment.device = match device {
+            InferenceDevice::Cpu => "cpu".into(),
+            InferenceDevice::Cuda(index) => format!("cuda:{index}"),
+        };
+        let dir = store.reserve_model(&experiment.id)?;
+        write_json(&dir.join("experiment.json"), &experiment)?;
+        eprintln!(
+            "Training {} on {}: {} iterations × {} games (seed {})",
+            experiment.id,
+            experiment.device,
+            experiment.training.iterations,
+            experiment.training.games_per_iteration,
+            experiment.training.seed
+        );
+        let device = device.burn_device();
+        device.seed(experiment.training.seed);
+        let output = train_with_progress(ValueNet::new(&device), device, &experiment.training, |metrics| {
+            eprintln!("iteration {}/{}  mse={:.6}  epsilon={:.3}  episodes={}  samples={}  wins(R/B)={}/{}  draws={}  elapsed={:.2}s", metrics.iteration, experiment.training.iterations, metrics.mse, metrics.epsilon, metrics.episodes, metrics.samples, metrics.outcomes[0], metrics.outcomes[1], metrics.outcomes[2], metrics.elapsed.as_secs_f64());
+        }).map_err(|e| anyhow!("training failed: {e}"))?;
+        output
+            .model
+            .save_file(dir.join("model.bpk"))
+            .context("saving model checkpoint")?;
+        write_json(&dir.join("report.json"), &output.report)?;
+        let mut descriptor = AgentDescriptor::new(
+            &experiment.id,
+            experiment.name.as_deref().unwrap_or(&experiment.id),
+        );
+        descriptor.metadata.insert("algorithm".into(), "mc".into());
+        descriptor
+            .metadata
+            .insert("seed".into(), experiment.training.seed.to_string());
+        descriptor
+            .metadata
+            .insert("device".into(), experiment.device);
+        // Publish the portable spec last: its checkpoint is relative to this file.
+        write_json(
+            &dir.join("agent.json"),
+            &AgentSpec {
+                descriptor,
+                config: AgentConfig::MonteCarlo {
+                    checkpoint: "model.bpk".into(),
+                },
+            },
+        )?;
+        println!("Saved agent {} to {}", experiment.id, dir.display());
+        println!(
+            "Evaluate: sequence --data-dir {:?} eval {} greedy --games 100",
+            store.root, experiment.id
+        );
+        Ok(())
+    }
+}
+
+pub fn run(
+    store: &Store,
+    path: &Path,
+    id: Option<String>,
+    device: Option<InferenceDevice>,
+) -> Result<()> {
+    #[cfg(feature = "burn")]
+    {
+        enabled::run(store, path, id, device)
+    }
+    #[cfg(not(feature = "burn"))]
+    {
+        let _ = (store, path, id, device);
+        anyhow::bail!(
+            "training requires Burn support; build sequence-cli with its default features or --features burn"
+        )
+    }
+}

@@ -1,0 +1,15 @@
+# Paths passed with --config are relative to your working directory.
+# Run from the repository root. Each trained checkpoint needs a distinct ID.
+algorithm = "mc"
+id = "mc-v1"
+name = "First Monte Carlo agent"
+device = "cpu" # Set to "cuda:0" for the NVIDIA GPU.
+
+[training]
+iterations = 10
+games_per_iteration = 8
+batch_size = 128
+learning_rate = 0.0003
+epsilon_start = 0.3
+epsilon_end = 0.05
+seed = 42

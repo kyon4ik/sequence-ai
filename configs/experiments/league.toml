@@ -1,0 +1,8 @@
+# After training mc-v1. Agent spec file paths resolve relative to this config.
+agents = ["mc-v1", "greedy", "random"]
+games_per_pair = 20
+seed = 42
+max_actions = 1000
+device = "cpu"
+initial_elo = 1000.0
+elo_k = 32.0

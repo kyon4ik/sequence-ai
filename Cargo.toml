@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sequence-core", "crates/sequence-agent", "crates/sequence-runner", "crates/sequence-training"]
+members = ["crates/sequence-core", "crates/sequence-agent", "crates/sequence-runner", "crates/sequence-training", "apps/cli"]
 
 [workspace.dependencies]
 sequence-core = { path = "crates/sequence-core" }

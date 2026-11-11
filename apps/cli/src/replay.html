@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sequence · Agent explorer</title><link rel="icon" href="data:,">
+<style>
+:root{font-family:system-ui,sans-serif;color:#e7ecf5;background:#121820;color-scheme:dark}*{box-sizing:border-box}body{max-width:1200px;margin:auto;padding:28px}h1{margin-bottom:4px}h2{font-size:1.15rem}p{color:#acbacd;line-height:1.5}main{display:grid;grid-template-columns:minmax(300px,620px) 1fr;gap:24px}section{background:#1c2531;border:1px solid #334153;border-radius:12px;padding:20px;margin:20px 0}main section{margin:0}select,button{font:inherit;padding:8px;background:#2b3a4d;color:inherit;border:1px solid #64748b;border-radius:6px}select{max-width:100%}button{cursor:pointer}button:disabled{opacity:.4}#board{display:grid;grid-template-columns:repeat(10,1fr);gap:3px;margin:18px 0}.cell{aspect-ratio:1;display:grid;place-items:center;background:#28384b;border-radius:4px;font-size:clamp(10px,1.6vw,17px);position:relative}.cell.red{background:#922e43}.cell.blue{background:#225f9a}.cell.claimed{border:2px solid #f2d276}.cell.changed{outline:3px solid white;z-index:1}.cell.corner{color:#f2d276}#frame{width:100%;margin:18px 0}.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5}table{border-collapse:collapse;width:100%;font-size:.9rem}td,th{text-align:left;padding:8px;border-bottom:1px solid #334153}.scroll{overflow:auto}.error{color:#ff9b9b;white-space:pre-wrap}a{color:#9bcbff}#models p{margin:8px 0}@media(max-width:760px){body{padding:14px}main{grid-template-columns:1fr}.cell{font-size:12px}}
+</style>
+</head>
+<body>
+<h1>Sequence</h1><p>Explore saved agents, experiment metrics, and each decision in a recorded game.</p>
+<div id="error" class="error" role="alert"></div>
+<section><h2>Trained agents</h2><div id="models">Loading…</div></section>
+<section><h2>Evaluation & tournaments</h2><label for="runs">Experiment </label><select id="runs"><option value="">Select a run</option></select><div id="standings" class="scroll"></div></section>
+<main>
+<section>
+<h2>Replay explorer</h2><label for="games">Game </label><select id="games"><option value="">Select a replay</option></select>
+<div id="board" aria-label="Sequence board"></div>
+<div class="controls"><button id="first" disabled>⏮ First</button><button id="prev" disabled>← Back</button><button id="play" disabled>Play</button><button id="next" disabled>Next →</button><button id="last" disabled>Last ⏭</button></div>
+<label for="frame" id="position">Frame 0</label><input type="range" id="frame" min="0" max="0" value="0" disabled>
+<p>Red / Blue chips · Gold borders mark claimed sequences · White outline marks the latest move.</p>
+</section>
+<section><h2>Decision & state</h2><pre id="details">Select a game to inspect the acting player’s hand, action, rewards, and decision time.</pre><a id="download" hidden>Download replay JSON</a></section>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+let record=null, cards=[], timer=null, requestVersion=0;
+const duration=d=>d?d.secs+d.nanos/1e9:0;
+async function api(path){const response=await fetch(path);if(!response.ok)throw Error(await response.text());return response.json()}
+function failed(error){$('error').textContent=error.message;stop()}
+function option(select,value,label=value){const node=document.createElement('option');node.value=value;node.textContent=label;select.append(node)}
+function table(headers,rows){const table=document.createElement('table');const head=table.createTHead().insertRow();headers.forEach(text=>{const th=document.createElement('th');th.textContent=text;head.append(th)});const body=table.createTBody();rows.forEach(row=>{const tr=body.insertRow();row.forEach(text=>{const td=tr.insertCell();td.textContent=text})});return table}
+function stop(){clearInterval(timer);timer=null;$('play').textContent='Play'}
+function render(){
+ if(!record)return;
+ const n=Number($('frame').value), step=n?record.steps[n-1]:null, state=step?step.state:record.header.initial_state;
+ const previous=n?(n===1?record.header.initial_state:record.steps[n-2].state):null;
+ $('position').textContent=`Frame ${n} / ${record.steps.length}`;
+ const claimed=new Set(state.board.sequences.flat(2));
+ $('board').replaceChildren(...state.board.cells.map((cell,i)=>{const node=document.createElement('div');node.className='cell';node.textContent=cards[i];node.title=`${String.fromCharCode(97+i%10)}${Math.floor(i/10)} · ${JSON.stringify(cell)}`;if(cell==='Corner')node.classList.add('corner');if(cell.Occupied)node.classList.add(cell.Occupied.toLowerCase());if(claimed.has(i))node.classList.add('claimed');if(previous&&JSON.stringify(cell)!==JSON.stringify(previous.board.cells[i]))node.classList.add('changed');return node}));
+ const metrics=record.metrics.players;
+ $('details').textContent=`Red: ${record.header.players[0].name} (${record.header.players[0].id})\nBlue: ${record.header.players[1].name} (${record.header.players[1].id})\nResult: ${JSON.stringify(record.termination)}\n\nTurn: ${state.turns}\nNext actor: ${state.current_player}\nSequences (R/B): ${state.board.sequences.map(x=>x.length).join(' / ')}\nActor hand: ${state.hand.map(card).join(', ')}\nOpponent cards: ${state.opponent_hand_size}\nDraw pile: ${state.draw_pile_size}\nLast discard: ${state.discard_pile.length?card(state.discard_pile.at(-1)):'—'}\n\n${step?`Last actor: ${step.actor}\nAction: ${JSON.stringify(step.action)}\nDecision: ${(duration(step.decision_time)*1000).toFixed(3)} ms\nStep rewards: ${step.rewards.join(' / ')}`:'Initial deal'}\n\nTotal rewards (R/B): ${metrics.map(x=>x.reward).join(' / ')}\nMean move (R/B): ${metrics.map(x=>(duration(x.decision_time)*1000/Math.max(1,x.decisions)).toFixed(3)).join(' / ')} ms\nMatch time: ${duration(record.metrics.elapsed).toFixed(3)} s`;
+ $('first').disabled=$('prev').disabled=n===0;$('next').disabled=$('last').disabled=n===record.steps.length;
+ if(n===record.steps.length)stop();
+}
+function card(c){return typeof c==='number'?['A','2','3','4','5','6','7','8','9','10','J','Q','K'][c>>2]+['♣','♠','♥','♦'][c&3]:String(c)}
+function seek(n){if(!record)return;$('frame').value=Math.max(0,Math.min(record.steps.length,n));render()}
+async function loadGame(){stop();const id=$('games').value,version=++requestVersion;record=null;$('frame').disabled=true;for(const id of ['first','prev','play','next','last'])$(id).disabled=true;if(!id)return;const loaded=await api('/api/replays/'+encodeURIComponent(id));if(version!==requestVersion)return;record=loaded;$('frame').max=record.steps.length;$('frame').value=0;$('frame').disabled=false;$('play').disabled=false;$('download').hidden=false;$('download').href='/api/replays/'+encodeURIComponent(id);$('download').download=id+'.json';$('error').textContent='';render()}
+$('games').onchange=()=>loadGame().catch(failed);$('frame').oninput=()=>{stop();render()};$('first').onclick=()=>{stop();seek(0)};$('last').onclick=()=>{stop();seek(record.steps.length)};$('prev').onclick=()=>{stop();seek(Number($('frame').value)-1)};$('next').onclick=()=>{stop();seek(Number($('frame').value)+1)};$('play').onclick=()=>{if(timer){stop();return}if(Number($('frame').value)===record.steps.length)seek(0);$('play').textContent='Pause';timer=setInterval(()=>seek(Number($('frame').value)+1),500)};
+document.addEventListener('keydown',event=>{if(['INPUT','SELECT','TEXTAREA'].includes(event.target.tagName))return;if(event.key==='ArrowLeft'){stop();seek(Number($('frame').value)-1)}if(event.key==='ArrowRight'){stop();seek(Number($('frame').value)+1)}});
+$('runs').onchange=async()=>{try{const id=$('runs').value;$('standings').replaceChildren();if(!id)return;const report=await api('/api/runs/'+encodeURIComponent(id));const rows=[...report.standings].sort((a,b)=>b.elo-a.elo).map(s=>[s.agent,s.wins,s.losses,s.draws,s.truncated,s.elo.toFixed(1),s.reward.toFixed(1),(duration(s.decision_time)*1000/Math.max(1,s.decisions)).toFixed(3)]);$('standings').append(table(['Agent','Wins','Losses','Draws','Truncated','Elo','Reward','Mean ms'],rows));$('games').replaceChildren();option($('games'),'','Select a replay');report.games.forEach(g=>option($('games'),g.replay,`${g.replay} · ${report.agents[g.players[0]].descriptor.id} vs ${report.agents[g.players[1]].descriptor.id}`))}catch(e){failed(e)}};
+async function init(){const [board,models,games,runs]=await Promise.all(['/api/board','/api/models','/api/replays','/api/runs'].map(api));cards=board;$('models').replaceChildren();if(!models.length)$('models').textContent='No trained agents yet. Train one with sequence train --config configs/experiments/mc.toml.';for(const model of models){const p=document.createElement('p');const iterations=model.training?.iterations||[],last=iterations.at(-1);p.textContent=`${model.agent.descriptor.name} (${model.id}) · ${model.agent.config.kind} · ${iterations.length} training iterations${last?` · final MSE ${last.mse.toFixed(6)} · ${iterations.reduce((n,m)=>n+m.episodes,0)} episodes`:''}`;$('models').append(p)}games.reverse().forEach(id=>option($('games'),id));runs.reverse().forEach(id=>option($('runs'),id));const selected=new URLSearchParams(location.search).get('game');if(selected&&games.includes(selected)){$('games').value=selected;await loadGame()}}
+init().catch(failed);
+</script>
+</body>
+</html>

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TrainingConfig {
     pub iterations: usize,
     pub games_per_iteration: usize,
@@ -65,20 +66,38 @@ pub struct TrainingOutput {
 /// actor-relative terminal outcomes. The returned report replaces stdout logging.
 /// The caller owns model/report persistence and device selection.
 pub fn train(
-    mut net: ValueNet,
+    net: ValueNet,
     device: Device,
     config: &TrainingConfig,
 ) -> Result<TrainingOutput, sequence_agent::AgentError> {
-    if config.games_per_iteration == 0 || config.batch_size == 0 {
-        return Err("games_per_iteration and batch_size must be positive".into());
+    train_with_progress(net, device, config, |_| {})
+}
+
+impl TrainingConfig {
+    pub fn validate(&self) -> Result<(), sequence_agent::AgentError> {
+        if self.iterations == 0 || self.games_per_iteration == 0 || self.batch_size == 0 {
+            return Err("iterations, games_per_iteration and batch_size must be positive".into());
+        }
+        if !self.learning_rate.is_finite()
+            || self.learning_rate <= 0.
+            || !(0.0..=1.0).contains(&self.epsilon_start)
+            || !(0.0..=1.0).contains(&self.epsilon_end)
+        {
+            return Err("invalid learning rate or exploration probability".into());
+        }
+        Ok(())
     }
-    if !config.learning_rate.is_finite()
-        || config.learning_rate <= 0.
-        || !(0.0..=1.0).contains(&config.epsilon_start)
-        || !(0.0..=1.0).contains(&config.epsilon_end)
-    {
-        return Err("invalid learning rate or exploration probability".into());
-    }
+}
+
+/// Like `train`, with a callback after each completed optimization iteration.
+/// The callback borrows the same metrics retained in the final report.
+pub fn train_with_progress(
+    mut net: ValueNet,
+    device: Device,
+    config: &TrainingConfig,
+    mut progress: impl FnMut(&IterationMetrics),
+) -> Result<TrainingOutput, sequence_agent::AgentError> {
+    config.validate()?;
 
     let device = device.autodiff();
     net = net.train();
@@ -89,8 +108,8 @@ pub fn train(
 
     for iteration in 0..config.iterations {
         let iteration_started = Instant::now();
-        let progress = iteration as f64 / config.iterations.saturating_sub(1).max(1) as f64;
-        let epsilon = config.epsilon_start + progress * (config.epsilon_end - config.epsilon_start);
+        let fraction = iteration as f64 / config.iterations.saturating_sub(1).max(1) as f64;
+        let epsilon = config.epsilon_start + fraction * (config.epsilon_end - config.epsilon_start);
 
         let mut samples = Vec::new();
         let mut results = [0usize; 3];
@@ -166,6 +185,7 @@ pub fn train(
             optimization_time: optimization_started.elapsed(),
             elapsed: iteration_started.elapsed(),
         });
+        progress(report.iterations.last().unwrap());
     }
 
     Ok(TrainingOutput {
