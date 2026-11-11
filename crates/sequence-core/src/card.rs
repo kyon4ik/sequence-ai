@@ -1,6 +1,8 @@
 use strum::{EnumCount, FromRepr, VariantArray};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "usize", into = "usize"))]
 pub struct Card(u8);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, EnumCount, VariantArray, FromRepr)]
@@ -58,6 +60,24 @@ impl Card {
     pub fn is_two_eyed_jack(&self) -> bool {
         *self == Card::new(CardRank::Jack, CardSuit::Diamonds)
             || *self == Card::new(CardRank::Jack, CardSuit::Clubs)
+    }
+}
+
+impl TryFrom<usize> for Card {
+    type Error = &'static str;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        if value < Self::COUNT {
+            Ok(Self(value as u8))
+        } else {
+            Err("card index must be less than 52")
+        }
+    }
+}
+
+impl From<Card> for usize {
+    fn from(value: Card) -> Self {
+        value.id()
     }
 }
 

@@ -1,0 +1,13 @@
+[package]
+name = "sequence-runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sequence-core = { workspace = true, features = ["serde"] }
+sequence-agent.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

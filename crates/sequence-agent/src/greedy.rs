@@ -1,20 +1,29 @@
 use sequence_core::{Action, Board, Color, Position, SimpleObservation};
 
-use crate::Bot;
+use crate::{Agent, AgentError};
 
-pub struct GreedyBot {
+pub struct GreedyAgent {
     weights: [i32; 6],
 }
 
-impl GreedyBot {
+impl Default for GreedyAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GreedyAgent {
+    pub const DEFAULT_WEIGHTS: [i32; 6] = [0, 0, 1, 5, 10, 100];
+
     pub fn new() -> Self {
-        Self {
-            weights: [0, 0, 1, 5, 10, 100],
-        }
+        Self::with_weights(Self::DEFAULT_WEIGHTS)
+    }
+    pub fn with_weights(weights: [i32; 6]) -> Self {
+        Self { weights }
     }
 
-    pub fn score_board(&self, board: &Board, color: Color) -> i32 {
-        let mut num_runs = [0; 6];
+    pub fn score_board(&self, board: &Board, color: Color) -> i64 {
+        let mut num_runs = [0i64; 6];
         for (dy, dx) in [(0, 1), (1, 0), (1, 1), (-1, 1)] {
             for start in Position::all() {
                 if start.offset(-dy, -dx).is_ok() {
@@ -37,15 +46,19 @@ impl GreedyBot {
             }
         }
         core::iter::zip(self.weights, num_runs)
-            .map(|(weight, count)| weight * count)
+            .map(|(weight, count)| i64::from(weight) * count)
             .sum()
     }
 }
 
-impl Bot<sequence_core::Simple> for GreedyBot {
-    fn choose_action(&mut self, obs: SimpleObservation<'_>, actions: &[Action]) -> Action {
-        let mut best_action = Action::Pass;
-        let mut best_score = -1;
+impl Agent<sequence_core::Simple> for GreedyAgent {
+    fn choose_action(
+        &mut self,
+        obs: SimpleObservation<'_>,
+        actions: &[Action],
+    ) -> Result<Action, AgentError> {
+        let mut best_action = *actions.first().ok_or("no legal actions")?;
+        let mut best_score = i64::MIN;
         for &action in actions {
             let score = match action {
                 Action::Play { position, .. } => {
@@ -63,7 +76,7 @@ impl Bot<sequence_core::Simple> for GreedyBot {
                 best_action = action;
             }
         }
-        best_action
+        Ok(best_action)
     }
 }
 
@@ -105,9 +118,9 @@ mod tests {
         for action in actions {
             obs.validate(action).unwrap();
         }
-        let mut bot = GreedyBot::new();
+        let mut bot = GreedyAgent::new();
         assert_eq!(bot.score_board(&board, Color::Red), 5);
-        assert_eq!(bot.choose_action(obs, &actions), actions[0]);
+        assert_eq!(bot.choose_action(obs, &actions).unwrap(), actions[0]);
     }
 
     #[test]
@@ -127,6 +140,9 @@ mod tests {
                 position,
             },
         ];
-        assert_eq!(GreedyBot::new().choose_action(obs, &actions), actions[0]);
+        assert_eq!(
+            GreedyAgent::new().choose_action(obs, &actions).unwrap(),
+            actions[0]
+        );
     }
 }

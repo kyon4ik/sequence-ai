@@ -1,3 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["sequence-bots","sequence-core"]
+members = ["crates/sequence-core", "crates/sequence-agent", "crates/sequence-runner", "crates/sequence-training"]
+
+[workspace.dependencies]
+sequence-core = { path = "crates/sequence-core" }
+sequence-agent = { path = "crates/sequence-agent" }
+sequence-runner = { path = "crates/sequence-runner" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+rand = "0.10.3"
+burn = { version = "=0.22.1", default-features = false, features = ["std", "flex", "cuda", "autodiff", "optim"] }

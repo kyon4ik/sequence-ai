@@ -46,7 +46,8 @@ impl ValueNet {
     }
 }
 
-pub(crate) fn batch(items: &[EncodedAfterstate], device: &Device) -> (Tensor<4>, Tensor<2>) {
+/// Packs encoded afterstates for inference or training.
+pub fn batch(items: &[EncodedAfterstate], device: &Device) -> (Tensor<4>, Tensor<2>) {
     assert!(!items.is_empty());
     let boards: Vec<_> = items.iter().flat_map(|x| x.board).collect();
     let contexts: Vec<_> = items.iter().flat_map(|x| x.context).collect();

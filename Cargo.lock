@@ -5162,13 +5162,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
-name = "sequence-bots"
+name = "sequence-agent"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
  "burn",
  "rand 0.10.3",
  "sequence-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5178,7 +5181,31 @@ dependencies = [
  "arrayvec",
  "rand 0.10.3",
  "rand_xoshiro",
+ "serde",
  "strum 0.28.0",
+]
+
+[[package]]
+name = "sequence-runner"
+version = "0.1.0"
+dependencies = [
+ "sequence-agent",
+ "sequence-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "sequence-training"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "rand 0.10.3",
+ "sequence-agent",
+ "sequence-core",
+ "sequence-runner",
+ "serde",
 ]
 
 [[package]]

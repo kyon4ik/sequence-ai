@@ -33,6 +33,7 @@ pub const fn get_card(position: Position) -> Option<Card> {
 
 /// A square's contents. Free corners count toward either player's sequences.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Cell {
     Empty,
     Corner,
@@ -57,9 +58,12 @@ pub struct Board {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "usize", into = "usize"))]
 pub struct Position(u8);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]
 pub enum Color {
     Red = 0,
@@ -127,6 +131,20 @@ impl Position {
             self.rank().wrapping_add_signed(dy),
             self.file().wrapping_add_signed(dx),
         )
+    }
+}
+
+impl TryFrom<usize> for Position {
+    type Error = PositionError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        Self::from_index(value)
+    }
+}
+
+impl From<Position> for usize {
+    fn from(value: Position) -> Self {
+        value.id()
     }
 }
 

@@ -45,6 +45,7 @@ pub trait Game {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Action {
     Play {
         card_index: usize,
@@ -57,6 +58,7 @@ pub enum Action {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GameOutcome {
     InProgress,
     Won(Color),

@@ -58,14 +58,18 @@ and index conversion are checked. Card IDs and rank ordering remain unchanged.
 
 ## Research and bots
 
-Afterstate construction belongs to `sequence-bots`, not the game trait or core
-observations. `sequence_bots::Afterstate::new` accepts a `SimpleObservation` and
+Afterstate construction belongs to `sequence-agent`, not the game trait or core
+observations. `sequence_agent::Afterstate::new` accepts a `SimpleObservation` and
 captures the board and remaining hand before replacement drawing or turn
 advancement. It validates the action and uses the core board's placement rules.
 Its result is not a complete next observation.
 
-`Bot<G>` associates a policy with a game variant. Existing random, greedy, and
-Monte Carlo implementations support only `Simple`; there are no Classic bots.
+`sequence_agent::Agent<G>` associates a fallible policy with a game variant.
+Random supports both variants; greedy and Monte Carlo currently support `Simple`.
 Greedy uses the original own-run scoring weights and first-candidate tie breaking.
 The Monte Carlo encoder retains its 400-board/50-context layout. Tensor layouts,
-rewards, policies, and training remain outside `sequence-core`.
+rewards, policies, and training remain outside `sequence-core`. Matches, metrics,
+events, and replay views live in `sequence-runner`; Monte Carlo self-play training
+lives in `sequence-training`. The optional `serde` feature serializes public
+actions, colors, outcomes, cells and checked card/position identifiers, without
+serializing private game state or packed board storage.

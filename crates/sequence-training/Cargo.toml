@@ -1,0 +1,15 @@
+[package]
+name = "sequence-training"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sequence-core.workspace = true
+sequence-agent.workspace = true
+sequence-runner.workspace = true
+serde.workspace = true
+burn = { workspace = true, optional = true }
+rand.workspace = true
+
+[features]
+burn = ["dep:burn", "sequence-agent/burn"]

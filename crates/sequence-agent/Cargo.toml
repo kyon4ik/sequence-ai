@@ -1,0 +1,18 @@
+[package]
+name = "sequence-agent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arrayvec = "0.7.8"
+burn = { workspace = true, optional = true }
+rand.workspace = true
+sequence-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[features]
+burn = ["dep:burn"]
