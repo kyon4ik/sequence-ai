@@ -44,7 +44,8 @@ impl McAgent {
         let values = self
             .model
             .forward(board, context)
-            .into_data()
+            .try_into_data()
+            .map_err(|e| format!("reading model predictions: {e}"))?
             .try_to_vec::<f32>()?;
         if values.len() != actions.len() || values.iter().any(|value| !value.is_finite()) {
             return Err("model returned invalid action values".into());

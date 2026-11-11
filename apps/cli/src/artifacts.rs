@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -78,7 +78,11 @@ impl Store {
     }
 
     pub fn replay_path(&self, id: &str) -> Result<PathBuf> {
-        validate_id(id)?;
+        let (folder, game) = id
+            .split_once('/')
+            .context("expected a folder/game replay reference")?;
+        validate_id(folder)?;
+        validate_id(game)?;
         Ok(self.root.join("replays").join(format!("{id}.json")))
     }
 
@@ -93,8 +97,45 @@ impl Store {
     }
 
     pub fn save_replay(&self, id: &str, record: &sequence_runner::MatchRecord) -> Result<()> {
-        fs::create_dir_all(self.root.join("replays"))?;
-        write_json(&self.replay_path(id)?, record)
+        let path = self.replay_path(id)?;
+        fs::create_dir_all(path.parent().unwrap())?;
+        write_json(&path, record)
+    }
+
+    pub fn replay_folders(&self) -> Result<Vec<String>> {
+        let root = self.root.join("replays");
+        let mut folders = Vec::new();
+        if !root.exists() {
+            return Ok(folders);
+        }
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type()?.is_dir() && validate_id(&name).is_ok() {
+                folders.push(name);
+            }
+        }
+        folders.sort();
+        Ok(folders)
+    }
+
+    pub fn replay_games(&self, folder: &str) -> Result<Vec<String>> {
+        validate_id(folder)?;
+        let mut games = Vec::new();
+        for entry in fs::read_dir(self.root.join("replays").join(folder))? {
+            let entry = entry?;
+            if entry.file_type()?.is_file()
+                && let Some(id) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.strip_suffix(".json"))
+                && validate_id(id).is_ok()
+            {
+                games.push(id.to_owned());
+            }
+        }
+        games.sort();
+        Ok(games)
     }
 
     pub fn new_run(&self, kind: &str) -> Result<(String, PathBuf)> {
@@ -120,15 +161,45 @@ pub fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<T> {
 
 /// Never replace an existing experiment artifact, even when its ID was reused.
 pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(&mut writer, value)?;
-    writer.write_all(b"\n")?;
-    writer
-        .flush()
-        .with_context(|| format!("flushing {}", path.display()))
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    {
+        let mut writer = BufWriter::new(temporary.as_file_mut());
+        serde_json::to_writer_pretty(&mut writer, value)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist_noclobber(path)
+        .with_context(|| format!("publishing {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn publication_is_atomic_and_never_overwrites() {
+        struct Failure;
+        impl Serialize for Failure {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                _: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("serialization failed"))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("artifact.json");
+        assert!(write_json(&path, &Failure).is_err());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        write_json(&path, &42).unwrap();
+        assert!(write_json(&path, &43).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "42\n");
+    }
 }

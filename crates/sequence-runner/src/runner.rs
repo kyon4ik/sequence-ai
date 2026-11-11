@@ -229,6 +229,20 @@ impl<G: RecordedGame, R: Reward<G>> MatchRunner<G, R> {
         };
         record.metrics.actions = record.steps.len();
         record.metrics.turns = game.turns();
+        record.metrics.elapsed = started.elapsed();
+        // A failing sink is not called again. The partial record is the recovery path.
+        if !sink_failed
+            && let Err(error) = sink.record(&MatchEvent::Finished {
+                termination: record.termination.clone(),
+                metrics: record.metrics.clone(),
+            })
+        {
+            let reason = format!("recording finish: {error}");
+            record.termination = Termination::Aborted {
+                reason: reason.clone(),
+            };
+            failure = Some(reason);
+        }
         for (i, player) in players.iter_mut().enumerate() {
             player.agent.on_episode_end(EpisodeResult {
                 status: match &record.termination {
@@ -245,20 +259,6 @@ impl<G: RecordedGame, R: Reward<G>> MatchRunner<G, R> {
                     .count(),
                 turns: game.turns(),
             });
-        }
-        record.metrics.elapsed = started.elapsed();
-        // A failing sink is not called again. The partial record is the recovery path.
-        if !sink_failed
-            && let Err(error) = sink.record(&MatchEvent::Finished {
-                termination: record.termination.clone(),
-                metrics: record.metrics.clone(),
-            })
-        {
-            let reason = format!("recording finish: {error}");
-            record.termination = Termination::Aborted {
-                reason: reason.clone(),
-            };
-            failure = Some(reason);
         }
         match failure {
             Some(message) => Err(RunError::Execution {

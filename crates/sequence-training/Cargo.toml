@@ -10,6 +10,9 @@ sequence-runner.workspace = true
 serde.workspace = true
 burn = { workspace = true, optional = true }
 rand.workspace = true
+rand_xoshiro = { version = "0.8.1", features = ["serde"] }
+serde_json.workspace = true
+tempfile = "3"
 
 [features]
 burn = ["dep:burn", "sequence-agent/burn"]

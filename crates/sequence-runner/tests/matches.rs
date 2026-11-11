@@ -471,3 +471,34 @@ fn invalid_setup_and_factory_errors_are_fallible_before_execution() {
     assert!(error.partial_record().is_none());
     assert!(error.to_string().contains("missing model"));
 }
+
+#[test]
+fn final_sink_failure_notifies_agents_of_abort() {
+    let mut red = Hooks::default();
+    let mut blue = Hooks::default();
+    let mut sink = FailingSink {
+        calls: 0,
+        fail_at: 3,
+    };
+    let error = MatchRunner::<Simple>::default()
+        .run_with_sink(
+            MatchConfig {
+                max_actions: 1,
+                ..Default::default()
+            },
+            [
+                Participant::new(AgentDescriptor::new("red", "Red"), &mut red),
+                Participant::new(AgentDescriptor::new("blue", "Blue"), &mut blue),
+            ],
+            &mut sink,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error.partial_record().unwrap().termination,
+        Termination::Aborted { .. }
+    ));
+    for agent in [red, blue] {
+        assert_eq!(agent.ends.len(), 1);
+        assert!(matches!(agent.ends[0].status, EpisodeStatus::Aborted));
+    }
+}

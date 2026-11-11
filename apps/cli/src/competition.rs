@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 use sequence_agent::{AgentSpec, InferenceDevice};
 use sequence_core::{GameOutcome, Simple};
-use sequence_runner::{MatchConfig, MatchRecord, MatchRunner};
+use sequence_runner::{MatchConfig, MatchRecord, MatchRunner, Participant};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -175,11 +175,14 @@ fn run(
     }
     let started = Instant::now();
     // Fail before starting the run if any spec cannot construct a policy.
-    for spec in &specs {
-        spec.config
-            .create(config.seed, device)
-            .map_err(|e| anyhow::anyhow!("agent {}: {e}", spec.descriptor.id))?;
-    }
+    let mut agents = specs
+        .iter()
+        .map(|spec| {
+            spec.config
+                .create(config.seed, device)
+                .map_err(|e| anyhow::anyhow!("agent {}: {e}", spec.descriptor.id))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let (id, dir) = store.new_run(kind)?;
     let mut report = Report {
         id,
@@ -208,25 +211,35 @@ fn run(
         for b in a + 1..report.agents.len() {
             for game in 0..config.games_per_pair {
                 let players = if game % 2 == 0 { [a, b] } else { [b, a] };
-                let factories = players.map(|i| report.agents[i].on_device(device));
+                let (left, right) = agents.split_at_mut(b);
+                let pair = [&mut *left[a], &mut *right[0]];
+                let [red, blue] = if game % 2 == 0 {
+                    pair
+                } else {
+                    let [a, b] = pair;
+                    [b, a]
+                };
+                let participants = [
+                    Participant::new(report.agents[players[0]].descriptor.clone(), red),
+                    Participant::new(report.agents[players[1]].descriptor.clone(), blue),
+                ];
                 let match_config = MatchConfig {
                     game_seed: rng.random(),
                     agent_seeds: [rng.random(), rng.random()],
                     max_actions: config.max_actions,
                 };
-                let replay = format!("{}-{:06}", report.id, report.games.len() + 1);
-                let record =
-                    match runner.run_factories(match_config, [&factories[0], &factories[1]]) {
-                        Ok(record) => record,
-                        Err(error) => {
-                            if let Some(partial) = error.partial_record() {
-                                store.save_replay(&replay, partial)?;
-                            }
-                            report.elapsed = started.elapsed();
-                            write_json(&dir.join("partial-report.json"), &report)?;
-                            return Err(error.into());
+                let replay = format!("{}/game-{:06}", report.id, report.games.len() + 1);
+                let record = match runner.run(match_config, participants) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        if let Some(partial) = error.partial_record() {
+                            store.save_replay(&replay, partial)?;
                         }
-                    };
+                        report.elapsed = started.elapsed();
+                        write_json(&dir.join("partial-report.json"), &report)?;
+                        return Err(error.into());
+                    }
+                };
                 store.save_replay(&replay, &record)?;
                 for (seat, index) in players.into_iter().enumerate() {
                     report.standings[index].record(&record, seat);

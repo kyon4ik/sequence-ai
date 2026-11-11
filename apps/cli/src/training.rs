@@ -15,7 +15,7 @@ mod enabled {
     use anyhow::{Context, anyhow};
     use burn::prelude::*;
     use sequence_agent::{AgentConfig, AgentDescriptor, AgentSpec, mc::ValueNet};
-    use sequence_training::mc::{TrainingConfig, train_with_progress};
+    use sequence_training::mc::{TrainingConfig, train_resumable};
     use serde::{Deserialize, Serialize};
 
     #[derive(Deserialize, Serialize)]
@@ -46,6 +46,7 @@ mod enabled {
         path: &Path,
         id: Option<String>,
         device: Option<InferenceDevice>,
+        resume: Option<&Path>,
     ) -> Result<()> {
         let mut experiment: Experiment = read_toml(path)?;
         if let Some(id) = id {
@@ -73,9 +74,17 @@ mod enabled {
         );
         let device = device.burn_device();
         device.seed(experiment.training.seed);
-        let output = train_with_progress(ValueNet::new(&device), device, &experiment.training, |metrics| {
-            eprintln!("iteration {}/{}  mse={:.6}  epsilon={:.3}  episodes={}  samples={}  wins(R/B)={}/{}  draws={}  elapsed={:.2}s", metrics.iteration, experiment.training.iterations, metrics.mse, metrics.epsilon, metrics.episodes, metrics.samples, metrics.outcomes[0], metrics.outcomes[1], metrics.outcomes[2], metrics.elapsed.as_secs_f64());
+        let checkpoints = dir.join("checkpoints");
+        std::fs::create_dir(&checkpoints)?;
+        let output = train_resumable(ValueNet::new(&device), device, &experiment.training, resume, |checkpoint| {
+            let metrics = checkpoint.report().iterations.last().unwrap();
+            checkpoint.save(&checkpoints.join(format!("iteration-{:06}", metrics.iteration)))?;
+            eprintln!("iteration {}/{}  mse={:.6}  epsilon={:.3}  samples={}  evaluation={:?}  elapsed={:.2}s", metrics.iteration, experiment.training.iterations, metrics.mse, metrics.epsilon, metrics.samples, metrics.evaluation_score, metrics.elapsed.as_secs_f64());
+            Ok(())
         }).map_err(|e| anyhow!("training failed: {e}"))?;
+        if let Some(best) = output.best_model {
+            best.save_file(dir.join("best.bpk"))?;
+        }
         output
             .model
             .save_file(dir.join("model.bpk"))
@@ -116,14 +125,15 @@ pub fn run(
     path: &Path,
     id: Option<String>,
     device: Option<InferenceDevice>,
+    resume: Option<&Path>,
 ) -> Result<()> {
     #[cfg(feature = "burn")]
     {
-        enabled::run(store, path, id, device)
+        enabled::run(store, path, id, device, resume)
     }
     #[cfg(not(feature = "burn"))]
     {
-        let _ = (store, path, id, device);
+        let _ = (store, path, id, device, resume);
         anyhow::bail!(
             "training requires Burn support; build sequence-cli with its default features or --features burn"
         )

@@ -30,6 +30,9 @@ struct Cli {
 enum Command {
     /// Train and save a neural agent from a TOML experiment (currently MC self-play).
     Train {
+        /// Resume a full checkpoint into a new agent ID, retaining the original config.
+        #[arg(long)]
+        resume: Option<PathBuf>,
         #[arg(long)]
         config: PathBuf,
         /// Override the config's agent ID; existing IDs are never overwritten.
@@ -61,6 +64,7 @@ enum Command {
     },
     /// Validate a saved replay and display a board frame (0 = initial deal).
     Replay {
+        /// Folder/game reference or an explicit JSON file path.
         game: String,
         /// Defaults to the final frame.
         #[arg(long)]
@@ -103,7 +107,12 @@ fn parse_device(value: &str) -> Result<InferenceDevice, String> {
 fn run(cli: Cli) -> Result<()> {
     let store = artifacts::Store::new(cli.data_dir);
     match cli.command {
-        Command::Train { config, id, device } => training::run(&store, &config, id, device),
+        Command::Train {
+            config,
+            id,
+            device,
+            resume,
+        } => training::run(&store, &config, id, device, resume.as_deref()),
         Command::Eval {
             agent_a,
             agent_b,
@@ -170,14 +179,15 @@ mod tests {
                 "--data-dir",
                 "/tmp/test",
                 "replay",
-                "match",
+                "run/match",
                 "--frame",
                 "0"
             ])
             .is_ok()
         );
         assert!(
-            Cli::try_parse_from(["sequence", "replay", "match", "--frame", "0", "--json"]).is_err()
+            Cli::try_parse_from(["sequence", "replay", "run/match", "--frame", "0", "--json"])
+                .is_err()
         );
     }
 }

@@ -13,3 +13,5 @@ learning_rate = 0.0003
 epsilon_start = 0.3
 epsilon_end = 0.05
 seed = 42
+evaluation_interval = 5
+evaluation_games = 20 # Per baseline; must be positive and even.

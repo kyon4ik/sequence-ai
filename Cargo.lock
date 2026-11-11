@@ -4871,6 +4871,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "662effc7698e08ea324d3acccf8d9d7f7bf79b9785e270a174ea36e56900c91d"
 dependencies = [
  "rand_core 0.10.1",
+ "serde",
 ]
 
 [[package]]
@@ -5347,10 +5348,13 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "rand 0.10.3",
+ "rand_xoshiro",
  "sequence-agent",
  "sequence-core",
  "sequence-runner",
  "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

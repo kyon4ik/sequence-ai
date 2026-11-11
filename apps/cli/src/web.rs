@@ -105,12 +105,7 @@ fn route(store: &Store, path: &str) -> Result<Reply> {
             }
             json_reply(models)
         }
-        "/api/replays" => json_reply(
-            entries(&store.root.join("replays"))?
-                .into_iter()
-                .filter_map(|name| name.strip_suffix(".json").map(str::to_owned))
-                .collect::<Vec<_>>(),
-        ),
+        "/api/replays" => json_reply(store.replay_folders()?),
         "/api/runs" => json_reply(
             entries(&store.root.join("runs"))?
                 .into_iter()
@@ -127,7 +122,14 @@ fn route(store: &Store, path: &str) -> Result<Reply> {
         ),
         _ => {
             if let Some(id) = path.strip_prefix("/api/replays/") {
-                return json_file(&store.replay_path(id)?);
+                if id.contains('/') {
+                    return json_file(&store.replay_path(id)?);
+                }
+                validate_id(id)?;
+                if !store.root.join("replays").join(id).is_dir() {
+                    return Ok((404, "text/plain", b"Not found".to_vec()));
+                }
+                return json_reply(store.replay_games(id)?);
             }
             if let Some(id) = path.strip_prefix("/api/runs/") {
                 validate_id(id)?;
@@ -144,6 +146,54 @@ fn route(store: &Store, path: &str) -> Result<Reply> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replays_are_browsed_by_folder_and_flat_files_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf());
+        fs::create_dir_all(dir.path().join("replays/run-1")).unwrap();
+        fs::create_dir_all(dir.path().join("replays/run-2")).unwrap();
+        fs::create_dir_all(dir.path().join("replays/invalid.folder")).unwrap();
+        fs::create_dir_all(dir.path().join("replays/run-1/nested.json")).unwrap();
+        fs::write(dir.path().join("replays/run-1/game-2.json"), "{}").unwrap();
+        fs::write(dir.path().join("replays/run-1/game-1.json"), "{}").unwrap();
+        fs::write(dir.path().join("replays/run-1/invalid.game.json"), "{}").unwrap();
+        fs::write(dir.path().join("replays/run-1/report.txt"), "{}").unwrap();
+        fs::write(dir.path().join("replays/legacy.json"), "{}").unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&route(&store, "/api/replays").unwrap().2).unwrap(),
+            json!(["run-1", "run-2"])
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&route(&store, "/api/replays/run-1").unwrap().2)
+                .unwrap(),
+            json!(["game-1", "game-2"])
+        );
+        assert_eq!(route(&store, "/api/replays/run-2").unwrap().2, b"[]");
+        assert_eq!(route(&store, "/api/replays/run-1/game-1").unwrap().0, 200);
+        assert_eq!(route(&store, "/api/replays/legacy").unwrap().0, 404);
+        assert_eq!(route(&store, "/api/replays/run-1/missing").unwrap().0, 404);
+        for id in [
+            "legacy",
+            "../secret",
+            "run/../secret",
+            "run//game",
+            "/game",
+            "run/%2e%2e",
+        ] {
+            assert!(store.replay_path(id).is_err());
+        }
+        for path in [
+            "/api/replays/..",
+            "/api/replays/../secret",
+            "/api/replays/run/../secret",
+            "/api/replays/run//game",
+            "/api/replays//game",
+            "/api/replays/run/%2e%2e",
+        ] {
+            assert!(route(&store, path).is_err());
+        }
+    }
+
     #[test]
     fn empty_store_is_viewable_and_routes_reject_traversal() {
         let dir = tempfile::tempdir().unwrap();

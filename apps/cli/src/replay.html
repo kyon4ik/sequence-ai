@@ -14,7 +14,11 @@
 <section><h2>Evaluation & tournaments</h2><label for="runs">Experiment </label><select id="runs"><option value="">Select a run</option></select><div id="standings" class="scroll"></div></section>
 <main>
 <section>
-<h2>Replay explorer</h2><label for="games">Game </label><select id="games"><option value="">Select a replay</option></select>
+<h2>Replay explorer</h2>
+<div class="controls">
+<label for="folders">Folder</label><select id="folders" disabled><option value="">Loading folders…</option></select>
+<label for="games">Game</label><select id="games" disabled><option value="">Select a folder first</option></select>
+</div>
 <div id="board" aria-label="Sequence board"></div>
 <div class="controls"><button id="first" disabled>⏮ First</button><button id="prev" disabled>← Back</button><button id="play" disabled>Play</button><button id="next" disabled>Next →</button><button id="last" disabled>Last ⏭</button></div>
 <label for="frame" id="position">Frame 0</label><input type="range" id="frame" min="0" max="0" value="0" disabled>
@@ -25,7 +29,7 @@
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
-let record=null, cards=[], timer=null, requestVersion=0;
+let record=null, cards=[], timer=null, requestVersion=0, folderRequestVersion=0, runRequestVersion=0;
 const duration=d=>d?d.secs+d.nanos/1e9:0;
 async function api(path){const response=await fetch(path);if(!response.ok)throw Error(await response.text());return response.json()}
 function failed(error){$('error').textContent=error.message;stop()}
@@ -46,11 +50,63 @@ function render(){
 }
 function card(c){return typeof c==='number'?['A','2','3','4','5','6','7','8','9','10','J','Q','K'][c>>2]+['♣','♠','♥','♦'][c&3]:String(c)}
 function seek(n){if(!record)return;$('frame').value=Math.max(0,Math.min(record.steps.length,n));render()}
-async function loadGame(){stop();const id=$('games').value,version=++requestVersion;record=null;$('frame').disabled=true;for(const id of ['first','prev','play','next','last'])$(id).disabled=true;if(!id)return;const loaded=await api('/api/replays/'+encodeURIComponent(id));if(version!==requestVersion)return;record=loaded;$('frame').max=record.steps.length;$('frame').value=0;$('frame').disabled=false;$('play').disabled=false;$('download').hidden=false;$('download').href='/api/replays/'+encodeURIComponent(id);$('download').download=id+'.json';$('error').textContent='';render()}
+function clearReplay(){
+ ++requestVersion;stop();record=null;
+ $('frame').disabled=true;$('frame').max=0;$('frame').value=0;$('position').textContent='Frame 0';
+ for(const id of ['first','prev','play','next','last'])$(id).disabled=true;
+ $('board').replaceChildren();$('download').hidden=true;$('download').removeAttribute('href');
+ $('details').textContent='Select a game to inspect the acting player’s hand, action, rewards, and decision time.';
+ $('error').textContent='';
+}
+async function loadFolder(report=null){
+ const folder=$('folders').value,version=++folderRequestVersion;
+ clearReplay();$('games').disabled=true;$('games').replaceChildren();
+ option($('games'),'',folder?'Loading games…':'Select a folder first');
+ if(!folder)return;
+ try{
+  const games=await api('/api/replays/'+encodeURIComponent(folder));
+  if(version!==folderRequestVersion)return;
+  $('games').replaceChildren();option($('games'),'',games.length?'Select a game':'No games in this folder');
+  const labels=new Map((report?.games||[]).map(g=>[g.replay,`${report.agents[g.players[0]].descriptor.id} vs ${report.agents[g.players[1]].descriptor.id}`]));
+  for(const game of games){const id=`${folder}/${game}`;option($('games'),id,labels.has(id)?`${game} · ${labels.get(id)}`:game)}
+  $('games').disabled=!games.length;
+ }catch(error){if(version!==folderRequestVersion)return;$('games').replaceChildren();option($('games'),'','Unable to load games');throw error}
+}
+async function loadGame(){
+ clearReplay();const id=$('games').value,version=requestVersion;if(!id)return;
+ const url='/api/replays/'+id.split('/').map(encodeURIComponent).join('/');
+ try{
+  const loaded=await api(url);if(version!==requestVersion)return;
+  record=loaded;$('frame').max=record.steps.length;$('frame').disabled=false;$('play').disabled=false;
+  $('download').hidden=false;$('download').href=url;$('download').download=id.split('/').at(-1)+'.json';render();
+ }catch(error){if(version===requestVersion)throw error}
+}
+$('folders').onchange=()=>loadFolder().catch(failed);
 $('games').onchange=()=>loadGame().catch(failed);$('frame').oninput=()=>{stop();render()};$('first').onclick=()=>{stop();seek(0)};$('last').onclick=()=>{stop();seek(record.steps.length)};$('prev').onclick=()=>{stop();seek(Number($('frame').value)-1)};$('next').onclick=()=>{stop();seek(Number($('frame').value)+1)};$('play').onclick=()=>{if(timer){stop();return}if(Number($('frame').value)===record.steps.length)seek(0);$('play').textContent='Pause';timer=setInterval(()=>seek(Number($('frame').value)+1),500)};
 document.addEventListener('keydown',event=>{if(['INPUT','SELECT','TEXTAREA'].includes(event.target.tagName))return;if(event.key==='ArrowLeft'){stop();seek(Number($('frame').value)-1)}if(event.key==='ArrowRight'){stop();seek(Number($('frame').value)+1)}});
-$('runs').onchange=async()=>{try{const id=$('runs').value;$('standings').replaceChildren();if(!id)return;const report=await api('/api/runs/'+encodeURIComponent(id));const rows=[...report.standings].sort((a,b)=>b.elo-a.elo).map(s=>[s.agent,s.wins,s.losses,s.draws,s.truncated,s.elo.toFixed(1),s.reward.toFixed(1),(duration(s.decision_time)*1000/Math.max(1,s.decisions)).toFixed(3)]);$('standings').append(table(['Agent','Wins','Losses','Draws','Truncated','Elo','Reward','Mean ms'],rows));$('games').replaceChildren();option($('games'),'','Select a replay');report.games.forEach(g=>option($('games'),g.replay,`${g.replay} · ${report.agents[g.players[0]].descriptor.id} vs ${report.agents[g.players[1]].descriptor.id}`))}catch(e){failed(e)}};
-async function init(){const [board,models,games,runs]=await Promise.all(['/api/board','/api/models','/api/replays','/api/runs'].map(api));cards=board;$('models').replaceChildren();if(!models.length)$('models').textContent='No trained agents yet. Train one with sequence train --config configs/experiments/mc.toml.';for(const model of models){const p=document.createElement('p');const iterations=model.training?.iterations||[],last=iterations.at(-1);p.textContent=`${model.agent.descriptor.name} (${model.id}) · ${model.agent.config.kind} · ${iterations.length} training iterations${last?` · final MSE ${last.mse.toFixed(6)} · ${iterations.reduce((n,m)=>n+m.episodes,0)} episodes`:''}`;$('models').append(p)}games.reverse().forEach(id=>option($('games'),id));runs.reverse().forEach(id=>option($('runs'),id));const selected=new URLSearchParams(location.search).get('game');if(selected&&games.includes(selected)){$('games').value=selected;await loadGame()}}
+$('runs').onchange=async()=>{
+ const id=$('runs').value,version=++runRequestVersion;$('standings').replaceChildren();if(!id)return;
+ try{
+  const report=await api('/api/runs/'+encodeURIComponent(id));if(version!==runRequestVersion)return;
+  const rows=[...report.standings].sort((a,b)=>b.elo-a.elo).map(s=>[s.agent,s.wins,s.losses,s.draws,s.truncated,s.elo.toFixed(1),s.reward.toFixed(1),(duration(s.decision_time)*1000/Math.max(1,s.decisions)).toFixed(3)]);
+  $('standings').append(table(['Agent','Wins','Losses','Draws','Truncated','Elo','Reward','Mean ms'],rows));
+  $('folders').value=id;await loadFolder(report);
+ }catch(error){if(version===runRequestVersion)failed(error)}
+};
+async function init(){
+ const [board,models,folders,runs]=await Promise.all(['/api/board','/api/models','/api/replays','/api/runs'].map(api));
+ cards=board;$('models').replaceChildren();
+ if(!models.length)$('models').textContent='No trained agents yet. Train one with sequence train --config configs/experiments/mc.toml.';
+ for(const model of models){const p=document.createElement('p');const iterations=model.training?.iterations||[],last=iterations.at(-1);p.textContent=`${model.agent.descriptor.name} (${model.id}) · ${model.agent.config.kind} · ${iterations.length} training iterations${last?` · final MSE ${last.mse.toFixed(6)} · ${iterations.reduce((n,m)=>n+m.episodes,0)} episodes`:''}`;$('models').append(p)}
+ $('folders').replaceChildren();option($('folders'),'',folders.length?'Select a folder':'No replay folders yet');
+ folders.reverse().forEach(id=>option($('folders'),id));$('folders').disabled=!folders.length;
+ runs.reverse().forEach(id=>option($('runs'),id));
+ const selected=new URLSearchParams(location.search).get('game');
+ if(selected&&selected.split('/').length===2&&folders.includes(selected.split('/')[0])){
+  $('folders').value=selected.split('/')[0];await loadFolder();
+  if([...$('games').options].some(option=>option.value===selected)){$('games').value=selected;await loadGame()}
+ }
+}
 init().catch(failed);
 </script>
 </body>

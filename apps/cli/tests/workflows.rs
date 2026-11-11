@@ -58,6 +58,7 @@ fn evaluation_persists_metrics_seeds_and_replayable_games() {
             }
         );
         let id = game["replay"].as_str().unwrap();
+        assert!(id.starts_with(&format!("{}/game-", report["id"].as_str().unwrap())));
         let record = read(data.join("replays").join(format!("{id}.json")));
         let output = success(cli(&data, &["replay", id, "--json"]));
         assert_eq!(
@@ -171,6 +172,10 @@ fn errors_are_nonzero_and_replay_corruption_is_detected() {
     let id = report["games"][0]["replay"].as_str().unwrap();
     assert!(!cli(&data, &["replay", id, "--frame", "2"]).status.success());
     let path = data.join("replays").join(format!("{id}.json"));
+    fs::copy(&path, data.join("replays/legacy.json")).unwrap();
+    let flat = cli(&data, &["replay", "legacy"]);
+    assert!(!flat.status.success());
+    assert!(String::from_utf8_lossy(&flat.stderr).contains("folder/game"));
     let mut record = read(&path);
     record["steps"][0]["actor"] = json!("Blue");
     fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
@@ -182,7 +187,7 @@ fn train_save_reload_and_evaluate(device: &str) {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
     let config = temp.path().join("mc.toml");
-    fs::write(&config, "algorithm = 'mc'\nid = 'test-model'\n[training]\niterations = 1\ngames_per_iteration = 1\nbatch_size = 128\nepsilon_start = 1.0\nepsilon_end = 1.0\nseed = 7\n").unwrap();
+    fs::write(&config, "algorithm = 'mc'\nid = 'test-model'\n[training]\niterations = 1\ngames_per_iteration = 1\nbatch_size = 128\nevaluation_games = 2\nepsilon_start = 1.0\nepsilon_end = 1.0\nseed = 7\n").unwrap();
     success(cli(
         &data,
         &[
@@ -195,12 +200,51 @@ fn train_save_reload_and_evaluate(device: &str) {
     ));
     let model = data.join("models/test-model");
     assert!(model.join("model.bpk").is_file());
+    assert!(model.join("best.bpk").is_file());
+    assert!(
+        model
+            .join("checkpoints/iteration-000001/optimizer.bpk")
+            .is_file()
+    );
+    assert!(
+        model
+            .join("checkpoints/iteration-000001/model.bpk")
+            .is_file()
+    );
+    assert!(
+        model
+            .join("checkpoints/iteration-000001/state.json")
+            .is_file()
+    );
+    let score = read(model.join("report.json"))["iterations"][0]["evaluation_score"]
+        .as_f64()
+        .unwrap();
+    assert!((0.0..=1.0).contains(&score));
     let spec = read(model.join("agent.json"));
     assert_eq!(spec["config"]["checkpoint"], "model.bpk");
     assert_eq!(
         read(model.join("report.json"))["iterations"][0]["episodes"],
         1
     );
+    success(cli(
+        &data,
+        &[
+            "train",
+            "--config",
+            config.to_str().unwrap(),
+            "--device",
+            device,
+            "--id",
+            "resumed-model",
+            "--resume",
+            model.join("checkpoints/iteration-000001").to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(
+        read(model.join("report.json")),
+        read(data.join("models/resumed-model/report.json"))
+    );
+    assert!(data.join("models/resumed-model/best.bpk").is_file());
     let before = fs::read(model.join("model.bpk")).unwrap();
     assert!(
         !cli(

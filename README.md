@@ -37,14 +37,15 @@ cargo run -p sequence-cli -- eval mc-v1 greedy --games 100 --device cuda:0
 # Three-agent round robin with fresh Elo ratings.
 cargo run -p sequence-cli -- tournament --config configs/experiments/league.toml --device cuda:0
 
-# Use a replay ID printed by evaluation/tournament.
-cargo run -p sequence-cli -- replay <game-id> --frame 10
+# Use a folder/game reference printed by evaluation/tournament.
+cargo run -p sequence-cli -- replay <run-id>/<game-id> --frame 10
 cargo run -p sequence-cli -- serve --port 8080
 ```
 
 Open `http://127.0.0.1:8080` to view trained-agent summaries and run standings,
-select games, scrub through frames, play/pause, and inspect hands, moves, sequences,
-rewards and decision times. Left/right arrow keys also step through the replay.
+select a replay folder and then a game, scrub through frames, play/pause, and inspect
+hands, moves, sequences, rewards and decision times. Left/right arrow keys also step
+through the replay.
 The UI is served locally by the CLI; it does not start training jobs.
 
 Install the executable for the shorter `sequence ...` commands:
@@ -78,7 +79,7 @@ data/
 │   ├── agent.json         # Shared AgentSpec; published after successful training
 │   ├── experiment.json    # Resolved config, overrides and seed
 │   └── report.json        # Iteration losses, outcomes, rewards and timings
-├── replays/<game-id>.json # Every evaluation/tournament game
+├── replays/<run-id>/game-NNNNNN.json # Games grouped by evaluation/tournament run
 └── runs/<run-id>/
     ├── agents.json        # Input agent definitions
     └── report.json        # Seeds, game/replay IDs, results, timings, rewards, Elo
@@ -105,11 +106,12 @@ both aggregate decision timings and each match's metrics; full replay records
 also retain individual move times. Match elapsed time excludes model loading;
 run elapsed time includes it. Exact timings and GPU results are not reproducible.
 
-`replay ID` validates the record against the current engine before displaying it.
-Use `--frame 0` for the initial deal, `--frame N` for a position, or `--json` for the
-complete validated record. The default is the final frame. An explicit JSON file
-path is also accepted. Replays need no checkpoint or inference backend. The browser
-reads the recorded snapshots and shows the next actor's hand; opponent hand contents
+`replay <folder>/<game>` validates the record against the current engine before
+displaying it. Use `--frame 0` for the initial deal, `--frame N` for a position, or
+`--json` for the complete validated record. The default is the final frame. An
+explicit JSON file path is also accepted. Replays need no checkpoint or inference
+backend. The browser reads the recorded snapshots and shows the next actor's hand;
+opponent hand contents
 are hidden by the runner's recording contract. The explorer lists saved evaluation
 and tournament games; training currently saves aggregate metrics, not self-play
 replays.
@@ -197,3 +199,40 @@ The CUDA integration check is explicit and requires host GPU access:
 cargo test -p sequence-training --features burn cuda_training_checkpoint_and_match -- --ignored
 cargo test -p sequence-cli cuda_training_cli_roundtrip -- --ignored
 ```
+
+### Training snapshots and evaluation
+
+Training atomically publishes a directory after every completed iteration:
+`models/<id>/checkpoints/iteration-NNNNNN/`. It contains `model.bpk`,
+`optimizer.bpk` (Adam moments and step counters), `state.json` (configuration,
+rollout/shuffle RNG state, iteration history and best score), and `best.bpk`
+when a policy has been evaluated. Earlier snapshots survive interruption.
+
+Resume into a new model ID using the original training configuration:
+
+```sh
+sequence train --config configs/experiments/mc.toml --id mc-resumed \
+  --resume data/models/mc-v1/checkpoints/iteration-000005
+```
+
+The iteration count remains the original total, preserving the exploration
+schedule. Configuration changes are rejected. The current network has no
+stochastic tensor layers; episode RNGs are recreated from seeds emitted by the
+saved training RNG. CPU continuation is tested against uninterrupted training;
+GPU numerical determinism still depends on kernels and hardware. Old weight-only
+snapshots remain valid for inference, but cannot resume training.
+
+Replays live in `replays/<folder>/<game>.json`; evaluation and tournament runs use
+`<run-id>/game-NNNNNN`. Use `sequence replay <run-id>/game-NNNNNN` or an explicit
+file path. In the browser, select a folder first, then a game inside it. Flat files
+directly under `replays/` are ignored; move them into a folder to browse them.
+
+`training.evaluation_interval` (default 10) controls periodic evaluation; the final
+iteration is always evaluated. `training.evaluation_games` (default 20, positive
+and even) is the number of games **per baseline**, against random and greedy.
+Evaluation uses zero exploration, a fixed seed schedule independent of rollout
+RNG, paired game seeds, and balanced seats. `evaluation_score` is the mean score
+(win 1, draw 0.5, loss 0) across both baselines. `best.bpk` retains the earliest
+highest-scoring evaluated checkpoint; `model.bpk` remains the latest model.
+Use a separate unseen seed set for final comparisons, and repeat training across
+multiple seeds before drawing strength conclusions.

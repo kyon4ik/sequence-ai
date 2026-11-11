@@ -1,16 +1,20 @@
+mod optimizer;
+
 use burn::{
-    optim::{AdamConfig, GradientsParams},
+    optim::{GradientsParams, ModuleOptimizer},
     prelude::*,
 };
-use rand::{RngExt, SeedableRng, rngs::SmallRng, seq::SliceRandom};
+use rand::{RngExt, SeedableRng, seq::SliceRandom};
+use rand_xoshiro::Xoshiro256PlusPlus;
 use sequence_agent::AgentDescriptor;
 use sequence_agent::mc::{EncodedAfterstate, McAgent, ValueNet, batch};
 use sequence_core::{Color, Game, GameOutcome, Simple};
-use sequence_runner::{MatchConfig, MatchRunner, Participant, Replay, Termination};
+use sequence_runner::{MatchConfig, MatchRunner, Participant, Termination};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrainingConfig {
     pub iterations: usize,
@@ -20,6 +24,8 @@ pub struct TrainingConfig {
     pub epsilon_start: f64,
     pub epsilon_end: f64,
     pub seed: u64,
+    pub evaluation_interval: usize,
+    pub evaluation_games: usize,
 }
 
 impl Default for TrainingConfig {
@@ -32,6 +38,8 @@ impl Default for TrainingConfig {
             epsilon_start: 0.2,
             epsilon_end: 0.05,
             seed: 42,
+            evaluation_interval: 10,
+            evaluation_games: 20,
         }
     }
 }
@@ -42,6 +50,7 @@ pub struct IterationMetrics {
     pub episodes: usize,
     pub samples: usize,
     pub mse: f64,
+    pub evaluation_score: Option<f64>,
     pub epsilon: f64,
     /// Red wins, Blue wins, draws.
     pub outcomes: [usize; 3],
@@ -59,6 +68,7 @@ pub struct TrainingReport {
 
 pub struct TrainingOutput {
     pub model: ValueNet,
+    pub best_model: Option<ValueNet>,
     pub report: TrainingReport,
 }
 
@@ -85,6 +95,14 @@ impl TrainingConfig {
         {
             return Err("invalid learning rate or exploration probability".into());
         }
+        if self.evaluation_interval == 0
+            || self.evaluation_games == 0
+            || !self.evaluation_games.is_multiple_of(2)
+        {
+            return Err(
+                "evaluation interval must be positive and games must be positive and even".into(),
+            );
+        }
         Ok(())
     }
 }
@@ -92,21 +110,131 @@ impl TrainingConfig {
 /// Like `train`, with a callback after each completed optimization iteration.
 /// The callback borrows the same metrics retained in the final report.
 pub fn train_with_progress(
-    mut net: ValueNet,
+    net: ValueNet,
     device: Device,
     config: &TrainingConfig,
     mut progress: impl FnMut(&IterationMetrics),
 ) -> Result<TrainingOutput, sequence_agent::AgentError> {
+    train_with_checkpoint(net, device, config, |_, report| {
+        progress(report.iterations.last().unwrap());
+        Ok(())
+    })
+}
+
+/// Compatibility callback for callers only interested in inference weights.
+pub fn train_with_checkpoint(
+    net: ValueNet,
+    device: Device,
+    config: &TrainingConfig,
+    mut checkpoint: impl FnMut(&ValueNet, &TrainingReport) -> Result<(), sequence_agent::AgentError>,
+) -> Result<TrainingOutput, sequence_agent::AgentError> {
+    train_resumable(net, device, config, None, |state| {
+        checkpoint(state.model, &state.metadata.report)
+    })
+}
+
+#[derive(Serialize, Deserialize)]
+struct ResumeMetadata {
+    version: u32,
+    config: TrainingConfig,
+    rng: Xoshiro256PlusPlus,
+    report: TrainingReport,
+    best_score: Option<f64>,
+}
+
+pub struct TrainingCheckpoint<'a> {
+    model: &'a ValueNet,
+    optimizer: &'a ModuleOptimizer,
+    metadata: &'a ResumeMetadata,
+    best_model: Option<&'a ValueNet>,
+}
+
+impl TrainingCheckpoint<'_> {
+    pub fn report(&self) -> &TrainingReport {
+        &self.metadata.report
+    }
+
+    /// Publish a complete checkpoint directory; incomplete writes stay invisible.
+    pub fn save(&self, destination: &Path) -> Result<(), sequence_agent::AgentError> {
+        if destination.exists() {
+            return Err("checkpoint already exists".into());
+        }
+        let parent = destination.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let staging = tempfile::tempdir_in(parent)?;
+        self.model
+            .clone()
+            .valid()
+            .save_file(staging.path().join("model.bpk"))?;
+        self.optimizer.save(staging.path().join("optimizer.bpk"))?;
+        if let Some(best) = self.best_model {
+            best.clone()
+                .valid()
+                .save_file(staging.path().join("best.bpk"))?;
+        }
+        std::fs::write(
+            staging.path().join("state.json"),
+            serde_json::to_vec_pretty(self.metadata)?,
+        )?;
+        for entry in std::fs::read_dir(staging.path())? {
+            std::fs::File::open(entry?.path())?.sync_all()?;
+        }
+        std::fs::rename(staging.path(), destination)?;
+        Ok(())
+    }
+}
+
+/// Resume at an iteration boundary with the original exploration schedule.
+/// The current model has no stochastic tensor layers; all continuing randomness
+/// comes from the serialized rollout/shuffle RNG and the episode seeds it emits.
+pub fn train_resumable(
+    mut net: ValueNet,
+    device: Device,
+    config: &TrainingConfig,
+    resume: Option<&Path>,
+    mut checkpoint: impl FnMut(&TrainingCheckpoint<'_>) -> Result<(), sequence_agent::AgentError>,
+) -> Result<TrainingOutput, sequence_agent::AgentError> {
     config.validate()?;
-
     let device = device.autodiff();
+    let mut optimizer = optimizer::adam();
+    let mut metadata = ResumeMetadata {
+        version: 1,
+        config: config.clone(),
+        rng: Xoshiro256PlusPlus::seed_from_u64(config.seed),
+        report: TrainingReport::default(),
+        best_score: None,
+    };
+    let mut best_model = None;
+    if let Some(path) = resume {
+        metadata = serde_json::from_reader(std::fs::File::open(path.join("state.json"))?)?;
+        if metadata.version != 1 || metadata.config != *config {
+            return Err("checkpoint version or training configuration differs".into());
+        }
+        if metadata.report.iterations.len() > config.iterations
+            || metadata
+                .report
+                .iterations
+                .iter()
+                .enumerate()
+                .any(|(i, m)| m.iteration != i + 1)
+        {
+            return Err("invalid checkpoint iteration history".into());
+        }
+        net = net.try_load_file(path.join("model.bpk"))?;
+        optimizer = optimizer.load(path.join("optimizer.bpk"))?;
+        if metadata.best_score.is_some() {
+            best_model = Some(net.clone().try_load_file(path.join("best.bpk"))?);
+        }
+    }
     net = net.train();
-    let mut optimizer = AdamConfig::new().init();
-    let mut rng = SmallRng::seed_from_u64(config.seed);
     let mut runner = MatchRunner::<Simple>::default();
-    let mut report = TrainingReport::default();
-
-    for iteration in 0..config.iterations {
+    let ResumeMetadata {
+        rng,
+        report,
+        best_score,
+        ..
+    } = &mut metadata;
+    for iteration in report.iterations.len()..config.iterations {
         let iteration_started = Instant::now();
         let fraction = iteration as f64 / config.iterations.saturating_sub(1).max(1) as f64;
         let epsilon = config.epsilon_start + fraction * (config.epsilon_end - config.epsilon_start);
@@ -146,18 +274,18 @@ pub fn train_with_progress(
                 reward[i] += record.metrics.players[i].reward;
                 decision_time[i] += record.metrics.players[i].decision_time;
             }
-            let mut replay = Replay::<Simple>::new(&record)?;
+            let mut game = Simple::from_seed(record.header.config.game_seed);
             for step in &record.steps {
-                let game = replay.seek(step.index)?;
                 let encoded = EncodedAfterstate::new(game.observation(), step.action)?;
                 samples.push((encoded, terminal_target(outcome, step.actor)));
+                game.apply(step.action)?;
             }
         }
         let rollout_time = rollout_started.elapsed();
 
-        samples.shuffle(&mut rng);
+        samples.shuffle(rng);
 
-        let mut total_loss = 0.;
+        let mut total_loss = Tensor::<1>::zeros([1], &device.clone().without_autodiff());
         let optimization_started = Instant::now();
         for minibatch in samples.chunks(config.batch_size) {
             let inputs: Vec<_> = minibatch.iter().map(|(x, _)| x.clone()).collect();
@@ -167,31 +295,105 @@ pub fn train_with_progress(
                 Tensor::<2>::from_data(TensorData::new(targets, [inputs.len(), 1]), &device);
             let error = net.forward(board, context) - targets;
             let loss = (error.clone() * error).mean();
-            total_loss += loss.clone().into_scalar::<f32>() as f64 * inputs.len() as f64;
+            total_loss = total_loss + loss.clone().without_autodiff() * inputs.len() as f32;
             let gradients = GradientsParams::from_grads(loss.backward(), &net);
             net = optimizer.step(config.learning_rate, net, gradients);
         }
 
+        let mse = total_loss
+            .try_into_scalar::<f32>()
+            .map_err(|e| format!("reading training loss: {e}"))? as f64
+            / samples.len() as f64;
+        let optimization_time = optimization_started.elapsed();
+        let evaluation_score = if (iteration + 1).is_multiple_of(config.evaluation_interval)
+            || iteration + 1 == config.iterations
+        {
+            Some(evaluate(&net, &device, config.evaluation_games)?)
+        } else {
+            None
+        };
         report.iterations.push(IterationMetrics {
             iteration: iteration + 1,
             episodes: config.games_per_iteration,
             samples: samples.len(),
-            mse: total_loss / samples.len() as f64,
+            mse,
+            evaluation_score,
             epsilon,
             outcomes: results,
             reward,
             decision_time,
             rollout_time,
-            optimization_time: optimization_started.elapsed(),
+            optimization_time,
             elapsed: iteration_started.elapsed(),
         });
-        progress(report.iterations.last().unwrap());
+        if let Some(score) = evaluation_score
+            && best_score.is_none_or(|best| score > best)
+        {
+            *best_score = Some(score);
+            best_model = Some(net.clone().valid());
+        }
+        let snapshot_metadata = ResumeMetadata {
+            version: 1,
+            config: config.clone(),
+            rng: rng.clone(),
+            report: report.clone(),
+            best_score: *best_score,
+        };
+        checkpoint(&TrainingCheckpoint {
+            model: &net,
+            optimizer: &optimizer,
+            metadata: &snapshot_metadata,
+            best_model: best_model.as_ref(),
+        })?;
     }
 
     Ok(TrainingOutput {
         model: net.valid(),
-        report,
+        best_model,
+        report: metadata.report,
     })
+}
+
+fn evaluate(
+    net: &ValueNet,
+    device: &Device,
+    games: usize,
+) -> Result<f64, sequence_agent::AgentError> {
+    use sequence_agent::AgentConfig;
+    let mut score = 0.;
+    for baseline in [AgentConfig::Random, AgentConfig::greedy()] {
+        let mut opponent = baseline.create(0, sequence_agent::InferenceDevice::Cpu)?;
+        let mut policy = McAgent::new(net.clone(), device.clone(), 0, 0.);
+        for index in 0..games {
+            let seat = index % 2;
+            let candidate =
+                Participant::new(AgentDescriptor::new("candidate", "Candidate"), &mut policy);
+            let other = Participant::new(
+                AgentDescriptor::new("baseline", "Baseline"),
+                opponent.as_mut(),
+            );
+            let players = if seat == 0 {
+                [candidate, other]
+            } else {
+                [other, candidate]
+            };
+            let record = MatchRunner::<Simple>::default().run(
+                MatchConfig {
+                    game_seed: 0xEA10_0000 + (index / 2) as u64,
+                    agent_seeds: [0xEA11_0000 + index as u64, 0xEA12_0000 + index as u64],
+                    ..Default::default()
+                },
+                players,
+            )?;
+            score += match record.termination {
+                Termination::Completed(GameOutcome::Won(color)) if color as usize == seat => 1.,
+                Termination::Completed(GameOutcome::Draw) => 0.5,
+                Termination::Completed(_) => 0.,
+                _ => return Err("evaluation did not complete".into()),
+            };
+        }
+    }
+    Ok(score / (2 * games) as f64)
 }
 
 fn terminal_target(outcome: GameOutcome, actor: Color) -> f32 {
@@ -207,6 +409,95 @@ fn terminal_target(outcome: GameOutcome, actor: Color) -> f32 {
 mod tests {
     use super::*;
     use sequence_agent::{Agent, AgentConfig, AgentFactory, AgentSpec, InferenceDevice};
+    use sequence_runner::Replay;
+
+    #[test]
+    fn resumed_training_matches_uninterrupted_updates() {
+        assert_resumed_updates(Device::flex());
+    }
+
+    #[test]
+    #[ignore = "requires an accessible NVIDIA GPU; run outside the sandbox"]
+    fn cuda_resumed_training_matches_uninterrupted_updates() {
+        assert_resumed_updates(Device::cuda(0));
+    }
+
+    fn assert_resumed_updates(device: Device) {
+        device.seed(91);
+        let config = TrainingConfig {
+            iterations: 2,
+            games_per_iteration: 1,
+            batch_size: 128,
+            epsilon_start: 1.,
+            epsilon_end: 1.,
+            evaluation_games: 2,
+            ..Default::default()
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let saved = directory.path().join("iteration-1");
+        let continuous = train_resumable(
+            ValueNet::new(&device),
+            device.clone(),
+            &config,
+            None,
+            |checkpoint| {
+                if checkpoint.report().iterations.len() == 1 {
+                    checkpoint.save(&saved)?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        // A fresh model has fresh parameter IDs; restoring must reconnect Adam state too.
+        let resumed = train_resumable(
+            ValueNet::new(&device),
+            device.clone(),
+            &config,
+            Some(&saved),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let a = &continuous.report.iterations[1];
+        let b = &resumed.report.iterations[1];
+        assert_eq!(a.samples, b.samples);
+        assert_eq!(a.outcomes, b.outcomes);
+        assert_eq!(a.epsilon, b.epsilon);
+        assert!((a.mse - b.mse).abs() < 1e-6, "{} != {}", a.mse, b.mse);
+        let game = Simple::from_seed(777);
+        let mut actions = Vec::new();
+        game.legal_actions(&mut actions);
+        let inputs: Vec<_> = actions
+            .iter()
+            .map(|&a| EncodedAfterstate::new(game.observation(), a).unwrap())
+            .collect();
+        let predict = |model: &ValueNet| {
+            let (board, context) = batch(&inputs, &device);
+            model
+                .forward(board, context)
+                .try_into_data()
+                .unwrap()
+                .try_to_vec::<f32>()
+                .unwrap()
+        };
+        for (a, b) in predict(&continuous.model)
+            .iter()
+            .zip(predict(&resumed.model))
+        {
+            assert!((a - b).abs() < 1e-6, "{a} != {b}");
+        }
+        let mut changed = config.clone();
+        changed.learning_rate *= 2.;
+        assert!(
+            train_resumable(
+                ValueNet::new(&device),
+                device,
+                &changed,
+                Some(&saved),
+                |_| Ok(())
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn targets_use_the_actor_perspective() {
@@ -239,6 +530,7 @@ mod tests {
             device.clone(),
             &TrainingConfig {
                 iterations: 1,
+                evaluation_games: 2,
                 games_per_iteration: 1,
                 batch_size: 128,
                 epsilon_start: 1.,
@@ -306,6 +598,7 @@ mod tests {
             device.clone(),
             &TrainingConfig {
                 iterations: 1,
+                evaluation_games: 2,
                 games_per_iteration: 1,
                 batch_size: 32,
                 epsilon_start: 1.,
