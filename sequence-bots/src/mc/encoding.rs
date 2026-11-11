@@ -1,4 +1,4 @@
-use sequence_core::{Action, Board, Card, CardRank, Observation, Position, get_card};
+use sequence_core::{Action, ActionError, Card, CardRank, Position, SimpleObservation, get_card};
 
 #[derive(Clone, Debug)]
 pub struct EncodedAfterstate {
@@ -6,7 +6,7 @@ pub struct EncodedAfterstate {
     pub context: [f32; 50],
 }
 
-// TODO: Make Jack last rank to remove this encoding
+// Preserve the existing 48-card checkpoint encoding independently of card IDs.
 fn card_index(card: Card) -> usize {
     let rank = card.rank() as usize;
     assert_ne!(card.rank(), CardRank::Jack, "no-jacks encoder");
@@ -14,79 +14,111 @@ fn card_index(card: Card) -> usize {
 }
 
 impl EncodedAfterstate {
-    /// `action` must be a legal placement from this observation.
-    pub fn new(obs: Observation<'_>, action: Action) -> Self {
-        let Action::Play {
-            card_index: played,
-            position,
-        } = action
-        else {
-            panic!("no-jacks agent requires a placement")
-        };
-
-        // Preview only deterministic effects: never draw or inspect the opponent's hand.
-        let mut board = *obs.board;
-        let ours = 1 << obs.color as u8;
-        let theirs = 1 << obs.color.next() as u8;
-        board.set(position, ours);
-        let added = board.update_sequences(position, obs.color);
+    /// Encodes a Simple afterstate, returning an error for an illegal action.
+    pub fn new(obs: SimpleObservation<'_>, action: Action) -> Result<Self, ActionError> {
+        let after = crate::Afterstate::new(obs, action)?;
+        let board = &after.board;
         let mut encoded = Self {
             board: [0.; 400],
             context: [0.; 50],
         };
-        assert!(played < obs.hand.len());
-        for (i, &card) in obs.hand.iter().enumerate() {
-            if i != played {
-                encoded.context[card_index(card)] += 0.5;
-            }
+        for &card in after.hand() {
+            encoded.context[card_index(card)] += 0.5;
         }
-        encoded.context[48] = (obs.sequences[obs.color as usize] + added) as f32 / 2.;
-        encoded.context[49] = obs.sequences[obs.color.next() as usize] as f32 / 2.;
+        encoded.context[48] = board.sequences(after.actor).len() as f32 / 2.;
+        encoded.context[49] = board.sequences(after.actor.next()).len() as f32 / 2.;
         for rank in 0..10 {
             for file in 0..10 {
                 let p = Position::new(rank, file).unwrap();
                 let i = p.id();
                 // Channel-first layout; free corners belong to both players.
-                encoded.board[i] = f32::from(board.get(p, ours) != 0);
-                encoded.board[100 + i] = f32::from(board.get(p, theirs) != 0);
-                encoded.board[200 + i] = f32::from(board.get(p, Board::SEQ_MASK) != 0);
+                encoded.board[i] = f32::from(board.is_owned_by(p, after.actor));
+                encoded.board[100 + i] = f32::from(board.is_owned_by(p, after.actor.next()));
+                encoded.board[200 + i] = f32::from(board.is_in_sequence(p));
                 if let Some(card) = get_card(p) {
                     encoded.board[300 + i] = encoded.context[card_index(card)];
                 }
             }
         }
-        encoded
+        Ok(encoded)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sequence_core::NoJacksGame;
+    use sequence_core::{Game, Simple};
 
     #[test]
     fn preview_matches_actual_board_but_excludes_draw() {
-        let mut game = NoJacksGame::from_seed(42);
+        let mut game = Simple::from_seed(42);
         let mut actions = Vec::new();
         game.legal_actions(&mut actions);
-        let actor = game.us();
-        let before = *game.board();
-        let encoded = EncodedAfterstate::new(game.observation(), actions[0]);
+        let actor = game.current_player();
+        let before = game.board().clone();
+        let encoded = EncodedAfterstate::new(game.observation(), actions[0]).unwrap();
         assert_eq!(*game.board(), before);
         assert_eq!(encoded.context[..48].iter().sum::<f32>(), 3.);
         assert_eq!(encoded.board[0], 1.);
         assert_eq!(encoded.board[100], 1.);
-        game.apply_unchecked(actions[0]);
+        game.apply(actions[0]).unwrap();
         for rank in 0..10 {
             for file in 0..10 {
                 let p = Position::new(rank, file).unwrap();
                 assert_eq!(
                     encoded.board[p.id()],
-                    f32::from(game.board().get(p, 1 << actor as u8) != 0)
+                    f32::from(game.board().is_owned_by(p, actor))
                 );
                 assert_eq!(
                     encoded.board[200 + p.id()],
-                    f32::from(game.board().get(p, Board::SEQ_MASK) != 0)
+                    f32::from(game.board().is_in_sequence(p))
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    use sequence_core::{CardSuit, Game, Simple};
+
+    #[test]
+    fn invalid_actions_return_errors() {
+        let game = Simple::from_seed(42);
+        assert!(matches!(
+            EncodedAfterstate::new(game.observation(), Action::Pass),
+            Err(ActionError::UnexpectedPass)
+        ));
+    }
+
+    #[test]
+    fn card_indices_preserve_checkpoint_order() {
+        let ranks = [
+            CardRank::Ace,
+            CardRank::Two,
+            CardRank::Three,
+            CardRank::Four,
+            CardRank::Five,
+            CardRank::Six,
+            CardRank::Seven,
+            CardRank::Eight,
+            CardRank::Nine,
+            CardRank::Ten,
+            CardRank::Queen,
+            CardRank::King,
+        ];
+        let suits = [
+            CardSuit::Clubs,
+            CardSuit::Spades,
+            CardSuit::Hearts,
+            CardSuit::Diamonds,
+        ];
+        for (rank_index, rank) in ranks.into_iter().enumerate() {
+            for (suit_index, suit) in suits.into_iter().enumerate() {
+                assert_eq!(
+                    card_index(Card::new(rank, suit)),
+                    4 * rank_index + suit_index
                 );
             }
         }

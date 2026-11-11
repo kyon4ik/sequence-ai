@@ -43,7 +43,6 @@ impl Card {
     }
 
     pub fn suit(&self) -> CardSuit {
-        // Safety: guaranted by construction
         CardSuit::from_repr(self.0 & 3).unwrap()
     }
 

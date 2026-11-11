@@ -4,7 +4,7 @@ use burn::{
     prelude::*,
 };
 use rand::{RngExt, SeedableRng, rngs::SmallRng, seq::SliceRandom};
-use sequence_core::{Color, GameOutcome, NoJacksGame};
+use sequence_core::{Color, Game, GameOutcome, Simple};
 
 #[derive(Clone, Debug)]
 pub struct TrainingConfig {
@@ -52,17 +52,16 @@ pub fn train(mut net: ValueNet, device: Device, config: &TrainingConfig) -> Valu
         let mut results = [0usize; 3];
 
         for _ in 0..config.games_per_iteration {
-            let mut game = NoJacksGame::from_seed(rng.random());
+            let mut game = Simple::from_seed(rng.random());
             let mut trajectory = Vec::new();
             let mut actions = Vec::new();
 
             while !game.is_game_over() {
-                actions.clear();
                 game.legal_actions(&mut actions);
-                let actor = game.us();
+                let actor = game.current_player();
                 let (action, encoded) = bot.select(game.observation(), &actions);
                 trajectory.push((encoded, actor));
-                game.apply_unchecked(action);
+                game.apply(action).unwrap();
             }
 
             let outcome = game.outcome();
@@ -111,7 +110,7 @@ fn terminal_target(outcome: GameOutcome, actor: Color) -> f32 {
         GameOutcome::Won(winner) if winner == actor => 1.,
         GameOutcome::Won(_) => -1.,
         GameOutcome::Draw => 0.,
-        GameOutcome::Unknown => panic!("Monte Carlo targets require a completed game"),
+        GameOutcome::InProgress => panic!("Monte Carlo targets require a completed game"),
     }
 }
 
@@ -137,10 +136,10 @@ mod tests {
         let device = Device::flex();
         device.seed(7);
         let net = ValueNet::new(&device);
-        let game = NoJacksGame::from_seed(7);
+        let game = Simple::from_seed(7);
         let mut actions = Vec::new();
         game.legal_actions(&mut actions);
-        let input = EncodedAfterstate::new(game.observation(), actions[0]);
+        let input = EncodedAfterstate::new(game.observation(), actions[0]).unwrap();
         let predict = |net: &ValueNet| {
             let (board, context) = model::batch(std::slice::from_ref(&input), &device);
             net.forward(board, context).into_scalar::<f32>()
@@ -167,11 +166,9 @@ mod tests {
         net.clone().save_file(&path).unwrap();
         let loaded = ValueNet::new(&device).load_file(&path);
         assert!((predict(&loaded) - after).abs() < 1e-6);
-        let mut bot = crate::BotKind::MonteCarlo {
-            checkpoint: path.clone(),
-        }
-        .create(7);
-        let selected = bot.choose_action(game.observation(), &actions);
+        // Keep this round-trip test on its CPU backend; the bot factory uses CUDA.
+        let mut bot = McBot::new(loaded, device.clone(), 7, 0.0);
+        let selected = bot.select(game.observation(), &actions).0;
         assert!(actions.contains(&selected));
         std::fs::remove_file(path).unwrap();
     }

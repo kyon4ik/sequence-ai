@@ -5165,6 +5165,7 @@ checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 name = "sequence-bots"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "burn",
  "rand 0.10.3",
  "sequence-core",

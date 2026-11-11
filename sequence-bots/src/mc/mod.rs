@@ -8,7 +8,7 @@ pub use training::{TrainingConfig, train};
 use crate::Bot;
 use burn::prelude::*;
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
-use sequence_core::{Action, Observation};
+use sequence_core::{Action, SimpleObservation};
 
 pub struct McBot {
     model: ValueNet,
@@ -30,7 +30,7 @@ impl McBot {
 
     pub(crate) fn select(
         &mut self,
-        obs: Observation<'_>,
+        obs: SimpleObservation<'_>,
         actions: &[Action],
     ) -> (Action, EncodedAfterstate) {
         assert!(
@@ -39,11 +39,18 @@ impl McBot {
         );
         if self.rng.random::<f64>() < self.epsilon {
             let action = actions[self.rng.random_range(0..actions.len())];
-            return (action, EncodedAfterstate::new(obs, action));
+            return (
+                action,
+                EncodedAfterstate::new(obs, action)
+                    .expect("Monte Carlo bot requires legal Simple actions"),
+            );
         }
         let candidates: Vec<_> = actions
             .iter()
-            .map(|&a| EncodedAfterstate::new(obs, a))
+            .map(|&a| {
+                EncodedAfterstate::new(obs, a)
+                    .expect("Monte Carlo bot requires legal Simple actions")
+            })
             .collect();
         // One inference batch scores all legal moves from the same player's perspective.
         let (board, context) = model::batch(&candidates, &self.device);
@@ -63,8 +70,8 @@ impl McBot {
     }
 }
 
-impl Bot for McBot {
-    fn choose_action<'a>(&mut self, obs: Observation<'a>, actions: &[Action]) -> Action {
+impl Bot<sequence_core::Simple> for McBot {
+    fn choose_action<'a>(&mut self, obs: SimpleObservation<'a>, actions: &[Action]) -> Action {
         self.select(obs, actions).0
     }
 }
