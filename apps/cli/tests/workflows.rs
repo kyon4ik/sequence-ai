@@ -75,6 +75,28 @@ fn evaluation_persists_metrics_seeds_and_replayable_games() {
         assert_eq!(played, 4);
         assert!(standing["decisions"].as_u64().unwrap() > 0);
     }
+    let summary = success(cli(
+        &data,
+        &[
+            "analyze",
+            report["id"].as_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    ));
+    let summary: Value = serde_json::from_slice(&summary.stdout).unwrap();
+    assert_eq!(summary["total_games"], 4);
+    assert_eq!(summary["matrix"][0][1]["completed"], 4);
+    assert_eq!(
+        summary["matrix"][0][1]["wins"],
+        report["standings"][0]["wins"]
+    );
+    assert_eq!(
+        summary["matrix"][0][1]["losses"],
+        summary["matrix"][1][0]["wins"]
+    );
+    assert_eq!(summary["matrix"][0][1]["as_red"]["games"], 2);
+    assert_eq!(summary["matrix"][0][1]["as_blue"]["games"], 2);
     // Seeded actions and outcomes remain stable; timings are intentionally excluded.
     let other = temp.path().join("repeat");
     success(cli(
@@ -142,6 +164,26 @@ fn tournament_resolves_relative_specs_and_excludes_truncations_from_elo() {
         assert_eq!(standing["draws"], 0);
         assert_eq!(standing["elo"], 1000.);
     }
+    let path = report_path(&data);
+    // Reports remain analyzable without any model, agent or replay files.
+    let isolated = temp.path().join("report-only.json");
+    fs::copy(path, &isolated).unwrap();
+    let output = success(cli(
+        &temp.path().join("no-data"),
+        &["analyze", isolated.to_str().unwrap(), "--format", "json"],
+    ));
+    let summary: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let pair = &summary["matrix"][0][1];
+    assert_eq!(pair["games"], 2);
+    assert_eq!(pair["truncated"], 2);
+    assert_eq!(pair["draws"], 0);
+    assert!(pair["win_rate"].is_null());
+    assert!(pair["score_rate"].is_null());
+    let csv = success(cli(
+        &data,
+        &["analyze", report["id"].as_str().unwrap(), "--format", "csv"],
+    ));
+    assert_eq!(String::from_utf8(csv.stdout).unwrap().lines().count(), 7);
     fs::write(&config, "agents = ['greedy', 'heuristic']\n").unwrap();
     assert!(
         !cli(&data, &["tournament", "--config", config.to_str().unwrap()])
@@ -323,6 +365,7 @@ fn invalid_training_configs_fail_before_creating_artifacts() {
     for text in [
         "algorithm = 'ppo'\nid = 'x'",
         "algorithm = 'mc'\nid = 'x'\n[training]\niterations = 0",
+        "algorithm = 'mc'\nid = 'x'\n[training]\ninference_batch_games = 0",
         "algorithm = 'mc'\nid = 'x'\n[training]\nbatch_szie = 1",
         "algorithm = 'mc'\nid = 'x'\n[training]\nlearning_rate = nan",
         "algorithm = 'mc'\nid = '../x'",

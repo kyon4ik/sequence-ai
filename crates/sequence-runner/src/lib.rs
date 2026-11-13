@@ -12,5 +12,5 @@ pub use record::{
     MatchRecord, PlayerMetrics, RecordError, Termination,
 };
 pub use replay::{Replay, ReplayError};
-pub use runner::{MatchRunner, Participant, Reward, RunError, TerminalReward};
+pub use runner::{MatchRunner, MatchSession, Participant, Reward, RunError, TerminalReward};
 pub use snapshot::{BoardSnapshot, ClassicSnapshot, GameSnapshot, RecordedGame};

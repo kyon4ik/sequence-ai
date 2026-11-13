@@ -1,0 +1,16 @@
+algorithm = "mc"
+id = "mc-v1-long"
+name = "Monte Carlo agent — longer training"
+device = "cuda:0"
+
+[training]
+iterations = 200
+games_per_iteration = 128
+batch_size = 128
+inference_batch_games = 128 # Fastest measured for this 128-game workload on the GTX 1660 Ti.
+learning_rate = 0.0003
+epsilon_start = 0.3
+epsilon_end = 0.05
+seed = 42
+evaluation_interval = 10
+evaluation_games = 100

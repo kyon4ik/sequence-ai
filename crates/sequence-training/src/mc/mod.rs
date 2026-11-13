@@ -1,4 +1,5 @@
 mod optimizer;
+mod rollout;
 
 use burn::{
     optim::{GradientsParams, ModuleOptimizer},
@@ -6,10 +7,9 @@ use burn::{
 };
 use rand::{RngExt, SeedableRng, seq::SliceRandom};
 use rand_xoshiro::Xoshiro256PlusPlus;
-use sequence_agent::AgentDescriptor;
-use sequence_agent::mc::{EncodedAfterstate, McAgent, ValueNet, batch};
+use sequence_agent::mc::{EncodedAfterstate, McInferenceMetrics, ValueNet, batch};
 use sequence_core::{Color, Game, GameOutcome, Simple};
-use sequence_runner::{MatchConfig, MatchRunner, Participant, Termination};
+use sequence_runner::{MatchConfig, Termination};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -20,6 +20,9 @@ pub struct TrainingConfig {
     pub iterations: usize,
     pub games_per_iteration: usize,
     pub batch_size: usize,
+    /// Concurrent games whose candidate moves share an inference batch.
+    /// This execution setting may change when resuming a checkpoint.
+    pub inference_batch_games: usize,
     pub learning_rate: f64,
     pub epsilon_start: f64,
     pub epsilon_end: f64,
@@ -34,6 +37,7 @@ impl Default for TrainingConfig {
             iterations: 100,
             games_per_iteration: 128,
             batch_size: 256,
+            inference_batch_games: 16,
             learning_rate: 3e-4,
             epsilon_start: 0.2,
             epsilon_end: 0.05,
@@ -57,7 +61,13 @@ pub struct IterationMetrics {
     pub reward: [f64; 2],
     pub decision_time: [Duration; 2],
     pub rollout_time: Duration,
+    #[serde(default)]
+    pub rollout_inference: McInferenceMetrics,
     pub optimization_time: Duration,
+    #[serde(default)]
+    pub evaluation_time: Duration,
+    #[serde(default)]
+    pub evaluation_inference: McInferenceMetrics,
     pub elapsed: Duration,
 }
 
@@ -85,8 +95,12 @@ pub fn train(
 
 impl TrainingConfig {
     pub fn validate(&self) -> Result<(), sequence_agent::AgentError> {
-        if self.iterations == 0 || self.games_per_iteration == 0 || self.batch_size == 0 {
-            return Err("iterations, games_per_iteration and batch_size must be positive".into());
+        if self.iterations == 0
+            || self.games_per_iteration == 0
+            || self.batch_size == 0
+            || self.inference_batch_games == 0
+        {
+            return Err("iterations, games_per_iteration, batch_size and inference_batch_games must be positive".into());
         }
         if !self.learning_rate.is_finite()
             || self.learning_rate <= 0.
@@ -207,6 +221,9 @@ pub fn train_resumable(
     let mut best_model = None;
     if let Some(path) = resume {
         metadata = serde_json::from_reader(std::fs::File::open(path.join("state.json"))?)?;
+        // Scheduling is an execution choice. All learning settings, including
+        // total iterations and the exploration schedule, remain immutable.
+        metadata.config.inference_batch_games = config.inference_batch_games;
         if metadata.version != 1 || metadata.config != *config {
             return Err("checkpoint version or training configuration differs".into());
         }
@@ -227,7 +244,6 @@ pub fn train_resumable(
         }
     }
     net = net.train();
-    let mut runner = MatchRunner::<Simple>::default();
     let ResumeMetadata {
         rng,
         report,
@@ -245,22 +261,22 @@ pub fn train_resumable(
         let mut decision_time = [Duration::ZERO; 2];
         let rollout_started = Instant::now();
 
-        for _ in 0..config.games_per_iteration {
-            let config = MatchConfig {
+        let matches: Vec<_> = (0..config.games_per_iteration)
+            .map(|_| MatchConfig {
                 game_seed: rng.random(),
                 agent_seeds: [rng.random(), rng.random()],
                 ..Default::default()
-            };
-            let mut red = McAgent::new(net.clone(), device.clone(), config.agent_seeds[0], epsilon);
-            let mut blue =
-                McAgent::new(net.clone(), device.clone(), config.agent_seeds[1], epsilon);
-            let record = runner.run(
-                config,
-                [
-                    Participant::new(AgentDescriptor::new("self-play", "MC"), &mut red),
-                    Participant::new(AgentDescriptor::new("self-play", "MC"), &mut blue),
-                ],
-            )?;
+            })
+            .collect();
+        let rollout = rollout::play(
+            &net,
+            &device,
+            &matches,
+            config.inference_batch_games,
+            epsilon,
+            None,
+        )?;
+        for record in rollout.records {
             let Termination::Completed(outcome) = record.termination else {
                 return Err("Monte Carlo targets require a completed episode".into());
             };
@@ -305,10 +321,19 @@ pub fn train_resumable(
             .map_err(|e| format!("reading training loss: {e}"))? as f64
             / samples.len() as f64;
         let optimization_time = optimization_started.elapsed();
+        let evaluation_started = Instant::now();
+        let mut evaluation_inference = McInferenceMetrics::default();
         let evaluation_score = if (iteration + 1).is_multiple_of(config.evaluation_interval)
             || iteration + 1 == config.iterations
         {
-            Some(evaluate(&net, &device, config.evaluation_games)?)
+            let (score, inference) = evaluate(
+                &net,
+                &device,
+                config.evaluation_games,
+                config.inference_batch_games,
+            )?;
+            evaluation_inference = inference;
+            Some(score)
         } else {
             None
         };
@@ -323,7 +348,14 @@ pub fn train_resumable(
             reward,
             decision_time,
             rollout_time,
+            rollout_inference: rollout.inference,
             optimization_time,
+            evaluation_time: if evaluation_score.is_some() {
+                evaluation_started.elapsed()
+            } else {
+                Duration::ZERO
+            },
+            evaluation_inference,
             elapsed: iteration_started.elapsed(),
         });
         if let Some(score) = evaluation_score
@@ -358,42 +390,37 @@ fn evaluate(
     net: &ValueNet,
     device: &Device,
     games: usize,
-) -> Result<f64, sequence_agent::AgentError> {
+    batch_games: usize,
+) -> Result<(f64, McInferenceMetrics), sequence_agent::AgentError> {
     use sequence_agent::AgentConfig;
     let mut score = 0.;
+    let mut metrics = McInferenceMetrics::default();
     for baseline in [AgentConfig::Random, AgentConfig::greedy()] {
-        let mut opponent = baseline.create(0, sequence_agent::InferenceDevice::Cpu)?;
-        let mut policy = McAgent::new(net.clone(), device.clone(), 0, 0.);
-        for index in 0..games {
-            let seat = index % 2;
-            let candidate =
-                Participant::new(AgentDescriptor::new("candidate", "Candidate"), &mut policy);
-            let other = Participant::new(
-                AgentDescriptor::new("baseline", "Baseline"),
-                opponent.as_mut(),
-            );
-            let players = if seat == 0 {
-                [candidate, other]
-            } else {
-                [other, candidate]
-            };
-            let record = MatchRunner::<Simple>::default().run(
-                MatchConfig {
-                    game_seed: 0xEA10_0000 + (index / 2) as u64,
-                    agent_seeds: [0xEA11_0000 + index as u64, 0xEA12_0000 + index as u64],
-                    ..Default::default()
-                },
-                players,
-            )?;
+        let configs: Vec<_> = (0..games)
+            .map(|index| MatchConfig {
+                game_seed: 0xEA10_0000 + (index / 2) as u64,
+                agent_seeds: [0xEA11_0000 + index as u64, 0xEA12_0000 + index as u64],
+                ..Default::default()
+            })
+            .collect();
+        let rollout = rollout::play(net, device, &configs, batch_games, 0., Some(&baseline))?;
+        metrics.decisions += rollout.inference.decisions;
+        metrics.batches += rollout.inference.batches;
+        metrics.candidates += rollout.inference.candidates;
+        metrics.encoding_time += rollout.inference.encoding_time;
+        metrics.prediction_time += rollout.inference.prediction_time;
+        for (index, record) in rollout.records.iter().enumerate() {
             score += match record.termination {
-                Termination::Completed(GameOutcome::Won(color)) if color as usize == seat => 1.,
+                Termination::Completed(GameOutcome::Won(color)) if color as usize == index % 2 => {
+                    1.
+                }
                 Termination::Completed(GameOutcome::Draw) => 0.5,
                 Termination::Completed(_) => 0.,
                 _ => return Err("evaluation did not complete".into()),
             };
         }
     }
-    Ok(score / (2 * games) as f64)
+    Ok((score / (2 * games) as f64, metrics))
 }
 
 fn terminal_target(outcome: GameOutcome, actor: Color) -> f32 {
@@ -408,8 +435,11 @@ fn terminal_target(outcome: GameOutcome, actor: Color) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sequence_agent::{Agent, AgentConfig, AgentFactory, AgentSpec, InferenceDevice};
+    use sequence_agent::{
+        Agent, AgentConfig, AgentDescriptor, AgentFactory, AgentSpec, InferenceDevice, mc::McAgent,
+    };
     use sequence_runner::Replay;
+    use sequence_runner::{MatchRunner, Participant};
 
     #[test]
     fn resumed_training_matches_uninterrupted_updates() {
@@ -426,7 +456,8 @@ mod tests {
         device.seed(91);
         let config = TrainingConfig {
             iterations: 2,
-            games_per_iteration: 1,
+            games_per_iteration: 3,
+            inference_batch_games: 2,
             batch_size: 128,
             epsilon_start: 1.,
             epsilon_end: 1.,
@@ -449,10 +480,12 @@ mod tests {
         )
         .unwrap();
         // A fresh model has fresh parameter IDs; restoring must reconnect Adam state too.
+        let mut resume_config = config.clone();
+        resume_config.inference_batch_games = 3;
         let resumed = train_resumable(
             ValueNet::new(&device),
             device.clone(),
-            &config,
+            &resume_config,
             Some(&saved),
             |_| Ok(()),
         )
@@ -508,6 +541,184 @@ mod tests {
                 -1.
             );
             assert_eq!(terminal_target(GameOutcome::Draw, winner), 0.);
+        }
+    }
+
+    #[test]
+    fn legacy_config_and_metrics_load_and_invalid_batching_is_rejected() {
+        let mut legacy = serde_json::to_value(TrainingConfig::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("inference_batch_games");
+        let mut config: TrainingConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(config.inference_batch_games, 16);
+        config.inference_batch_games = 0;
+        assert!(config.validate().is_err());
+        let mut metric = serde_json::json!({"iteration": 1, "episodes": 1, "samples": 1, "mse": 1., "evaluation_score": null, "epsilon": 1., "outcomes": [1,0,0], "reward": [1.,-1.]});
+        for field in ["rollout_time", "optimization_time", "elapsed"] {
+            metric[field] = serde_json::to_value(Duration::ZERO).unwrap();
+        }
+        metric["decision_time"] = serde_json::to_value([Duration::ZERO; 2]).unwrap();
+        let loaded: IterationMetrics = serde_json::from_value(metric).unwrap();
+        assert_eq!(loaded.rollout_inference.batches, 0);
+        assert_eq!(loaded.evaluation_time, Duration::ZERO);
+    }
+
+    #[test]
+    fn batching_preserves_episode_rng_order_rewards_and_replays() {
+        let device = Device::flex();
+        let net = ValueNet::new(&device);
+        let configs: Vec<_> = (0..7)
+            .map(|seed| MatchConfig {
+                game_seed: seed,
+                agent_seeds: [seed + 100, seed + 200],
+                ..Default::default()
+            })
+            .collect();
+        let sequential = rollout::play(&net, &device, &configs, 1, 1., None).unwrap();
+        let batched = rollout::play(&net, &device, &configs, 3, 1., None).unwrap();
+        assert_eq!(batched.inference.batches, 0);
+        for ((expected, actual), config) in sequential
+            .records
+            .iter()
+            .zip(&batched.records)
+            .zip(&configs)
+        {
+            let mut red = McAgent::new(net.clone(), device.clone(), 0, 1.);
+            let mut blue = McAgent::new(net.clone(), device.clone(), 0, 1.);
+            let scalar = MatchRunner::<Simple>::default()
+                .run(
+                    config.clone(),
+                    [
+                        Participant::new(AgentDescriptor::new("self-play", "MC"), &mut red),
+                        Participant::new(AgentDescriptor::new("self-play", "MC"), &mut blue),
+                    ],
+                )
+                .unwrap();
+            for reference in [expected, &scalar] {
+                assert_eq!(actual.header, reference.header);
+                assert_eq!(actual.termination, reference.termination);
+                assert_eq!(
+                    actual
+                        .steps
+                        .iter()
+                        .map(|s| (s.action, s.rewards, &s.state))
+                        .collect::<Vec<_>>(),
+                    reference
+                        .steps
+                        .iter()
+                        .map(|s| (s.action, s.rewards, &s.state))
+                        .collect::<Vec<_>>()
+                );
+            }
+            Replay::<Simple>::new(actual).unwrap();
+        }
+    }
+
+    #[test]
+    fn batched_baselines_preserve_seats_seeds_and_action_limits() {
+        let device = Device::flex();
+        let net = ValueNet::new(&device);
+        let configs: Vec<_> = (0..5)
+            .map(|seed| MatchConfig {
+                game_seed: seed / 2,
+                agent_seeds: [seed + 50, seed + 100],
+                max_actions: 3,
+            })
+            .collect();
+        for baseline in [AgentConfig::Random, AgentConfig::greedy()] {
+            let output = rollout::play(&net, &device, &configs, 3, 1., Some(&baseline)).unwrap();
+            for (index, (config, actual)) in configs.iter().zip(output.records).enumerate() {
+                let mut policy = McAgent::new(net.clone(), device.clone(), 0, 1.);
+                let mut opponent = baseline.create(0, InferenceDevice::Cpu).unwrap();
+                let candidate =
+                    Participant::new(AgentDescriptor::new("candidate", "Candidate"), &mut policy);
+                let other = Participant::new(
+                    AgentDescriptor::new("baseline", "Baseline"),
+                    opponent.as_mut(),
+                );
+                let players = if index % 2 == 0 {
+                    [candidate, other]
+                } else {
+                    [other, candidate]
+                };
+                let expected = MatchRunner::<Simple>::default()
+                    .run(config.clone(), players)
+                    .unwrap();
+                assert_eq!(actual.header, expected.header);
+                assert_eq!(actual.termination, expected.termination);
+                assert_eq!(
+                    actual
+                        .steps
+                        .iter()
+                        .map(|s| (s.actor, s.action, s.rewards, &s.state))
+                        .collect::<Vec<_>>(),
+                    expected
+                        .steps
+                        .iter()
+                        .map(|s| (s.actor, s.action, s.rewards, &s.state))
+                        .collect::<Vec<_>>()
+                );
+                Replay::<Simple>::new(&actual).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "GPU throughput benchmark; run outside the sandbox with --nocapture"]
+    fn cuda_rollout_throughput() {
+        let device = Device::cuda(0);
+        device.seed(42);
+        let mut net = ValueNet::new(&device);
+        if let Ok(path) = std::env::var("SEQUENCE_BENCH_CHECKPOINT") {
+            net = net.try_load_file(path).unwrap();
+        }
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(771);
+        let configs: Vec<_> = (0..128)
+            .map(|_| MatchConfig {
+                game_seed: rng.random(),
+                agent_seeds: [rng.random(), rng.random()],
+                ..Default::default()
+            })
+            .collect();
+        let batch_games: Vec<usize> = std::env::var("SEQUENCE_BENCH_BATCH_GAMES")
+            .unwrap_or_else(|_| "1,8,16,32,64,128".into())
+            .split(',')
+            .map(|value| {
+                value
+                    .trim()
+                    .parse()
+                    .expect("benchmark batch sizes must be integers")
+            })
+            .collect();
+        assert!(batch_games.iter().all(|&size| size > 0));
+        for &size in &batch_games {
+            // Use the full workload so batches larger than 32 are warmed too.
+            rollout::play(&net, &device, &configs, size, 0.175, None).unwrap();
+            evaluate(&net, &device, 100, size).unwrap();
+        }
+        // Alternate batch sizes between repetitions to reduce ordering bias.
+        for repetition in 0..5 {
+            for &batch_games in &batch_games {
+                let started = Instant::now();
+                let output =
+                    rollout::play(&net, &device, &configs, batch_games, 0.175, None).unwrap();
+                let elapsed = started.elapsed().as_secs_f64();
+                for record in &output.records {
+                    Replay::<Simple>::new(record).unwrap();
+                }
+                println!(
+                    "{}",
+                    serde_json::json!({"phase": "rollout", "batch_games": batch_games, "repetition": repetition, "seconds": elapsed, "games_per_second": 128. / elapsed, "actions": output.records.iter().map(|r| r.steps.len()).sum::<usize>(), "inference": output.inference})
+                );
+                let started = Instant::now();
+                let (score, inference) = evaluate(&net, &device, 100, batch_games).unwrap();
+                println!(
+                    "{}",
+                    serde_json::json!({"phase": "evaluation", "batch_games": batch_games, "repetition": repetition, "seconds": started.elapsed().as_secs_f64(), "score": score, "inference": inference})
+                );
+            }
         }
     }
 

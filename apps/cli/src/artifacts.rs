@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{BufWriter, Write},
+    io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -151,7 +151,8 @@ impl Store {
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_reader(file).with_context(|| format!("parsing {}", path.display()))
+    serde_json::from_reader(BufReader::new(file))
+        .with_context(|| format!("parsing {}", path.display()))
 }
 
 pub fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<T> {

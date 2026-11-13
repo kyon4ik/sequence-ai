@@ -1,0 +1,29 @@
+# Cross-play across one training trajectory, with fixed comparison agents.
+# Agent spec paths resolve relative to this file; checkpoint paths resolve
+# relative to each spec. The original run contains iterations 30 and 100;
+# the resumed run contains iterations 150 and 200.
+agents = [
+    "../agents/mc-long-030.json",
+    "../agents/mc-long-100.json",
+    "../agents/mc-long-150.json",
+    "../agents/mc-long-200.json",
+    "../../data/models/mc-v1/agent.json",
+    "greedy",
+    "random",
+]
+
+# Seven entrants: 21 unordered pairs, 10,500 games in total.
+# Each pair plays 250 games in each seat. Use 200 for an initial screening.
+games_per_pair = 500
+
+# Fresh seed, separate from training and the earlier 500-game comparisons.
+# Results are reproducible on CPU. Different pairs receive different deals;
+# the CLI records every game's seeds and replay in the run report/artifacts.
+seed = 20261112
+max_actions = 1000
+device = "cpu"
+
+# Elo is reset for this tournament. Use pairwise results to assess cycling;
+# the overall rating alone does not expose who beats whom.
+initial_elo = 1000.0
+elo_k = 32.0

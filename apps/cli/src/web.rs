@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::{
+    analysis,
     artifacts::{Store, read_json},
     validate_id,
 };
@@ -132,6 +133,26 @@ fn route(store: &Store, path: &str) -> Result<Reply> {
                 return json_reply(store.replay_games(id)?);
             }
             if let Some(id) = path.strip_prefix("/api/runs/") {
+                if let Some((id, view)) = id.split_once('/') {
+                    validate_id(id)?;
+                    if !matches!(view, "pairwise" | "pairwise.csv") {
+                        bail!("unknown run view");
+                    }
+                    let path = store.root.join("runs").join(id).join("report.json");
+                    if !path.is_file() {
+                        return Ok((404, "text/plain", b"Not found".to_vec()));
+                    }
+                    let summary = analysis::load(&path)?;
+                    return if view == "pairwise.csv" {
+                        Ok((
+                            200,
+                            "text/csv; charset=utf-8",
+                            analysis::csv(&summary).into_bytes(),
+                        ))
+                    } else {
+                        json_reply(summary)
+                    };
+                }
                 validate_id(id)?;
                 return json_file(&store.root.join("runs").join(id).join("report.json"));
             }
@@ -146,6 +167,46 @@ fn route(store: &Store, path: &str) -> Result<Reply> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pairwise_routes_analyze_saved_reports_without_models_or_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf());
+        let run = dir.path().join("runs/pair-test");
+        fs::create_dir_all(&run).unwrap();
+        let report = json!({
+            "id": "pair-test",
+            "agents": [
+                {"descriptor": {"id": "a", "name": "A", "metadata": {}}, "config": {"kind": "monte_carlo", "checkpoint": "missing.bpk"}},
+                {"descriptor": {"id": "b", "name": "B", "metadata": {}}}
+            ],
+            "games": [{"players": [1,0], "termination": {"Completed": {"Won": "Blue"}}, "metrics": sequence_runner::MatchMetrics::default()}]
+        });
+        fs::write(
+            run.join("report.json"),
+            serde_json::to_vec(&report).unwrap(),
+        )
+        .unwrap();
+        let summary: Value =
+            serde_json::from_slice(&route(&store, "/api/runs/pair-test/pairwise").unwrap().2)
+                .unwrap();
+        assert_eq!(summary["matrix"][0][1]["wins"], 1);
+        assert_eq!(summary["matrix"][0][1]["as_blue"]["wins"], 1);
+        assert_eq!(summary["matrix"][1][0]["losses"], 1);
+        assert!(summary["matrix"][0][0].is_null());
+        let (status, mime, bytes) = route(&store, "/api/runs/pair-test/pairwise.csv").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(mime, "text/csv; charset=utf-8");
+        assert_eq!(String::from_utf8(bytes).unwrap().lines().count(), 3);
+        assert_eq!(route(&store, "/api/runs/missing/pairwise").unwrap().0, 404);
+        for path in [
+            "/api/runs/../pairwise",
+            "/api/runs/pair-test/pairwise/..",
+            "/api/runs/%2e%2e/pairwise.csv",
+        ] {
+            assert!(route(&store, path).is_err());
+        }
+    }
+
     #[test]
     fn replays_are_browsed_by_folder_and_flat_files_are_ignored() {
         let dir = tempfile::tempdir().unwrap();

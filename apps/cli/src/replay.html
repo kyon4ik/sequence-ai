@@ -6,12 +6,23 @@
 <style>
 :root{font-family:system-ui,sans-serif;color:#e7ecf5;background:#121820;color-scheme:dark}*{box-sizing:border-box}body{max-width:1200px;margin:auto;padding:28px}h1{margin-bottom:4px}h2{font-size:1.15rem}p{color:#acbacd;line-height:1.5}main{display:grid;grid-template-columns:minmax(300px,620px) 1fr;gap:24px}section{background:#1c2531;border:1px solid #334153;border-radius:12px;padding:20px;margin:20px 0}main section{margin:0}select,button{font:inherit;padding:8px;background:#2b3a4d;color:inherit;border:1px solid #64748b;border-radius:6px}select{max-width:100%}button{cursor:pointer}button:disabled{opacity:.4}#board{display:grid;grid-template-columns:repeat(10,1fr);gap:3px;margin:18px 0}.cell{aspect-ratio:1;display:grid;place-items:center;background:#28384b;border-radius:4px;font-size:clamp(10px,1.6vw,17px);position:relative}.cell.red{background:#922e43}.cell.blue{background:#225f9a}.cell.claimed{border:2px solid #f2d276}.cell.changed{outline:3px solid white;z-index:1}.cell.corner{color:#f2d276}#frame{width:100%;margin:18px 0}.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5}table{border-collapse:collapse;width:100%;font-size:.9rem}td,th{text-align:left;padding:8px;border-bottom:1px solid #334153}.scroll{overflow:auto}.error{color:#ff9b9b;white-space:pre-wrap}a{color:#9bcbff}#models p{margin:8px 0}@media(max-width:760px){body{padding:14px}main{grid-template-columns:1fr}.cell{font-size:12px}}
 </style>
+<style>
+main section{min-width:0}.controls select{min-width:0}
+h3{font-size:1rem;margin-top:24px}.pair-controls{margin:16px 0}.matrix{width:max-content;min-width:100%;border-collapse:separate;border-spacing:3px}.matrix caption{text-align:left;color:#acbacd;margin:8px 0}.matrix th{font-size:.8rem;max-width:170px;overflow-wrap:anywhere}.matrix .row-label{position:sticky;left:0;background:#1c2531;z-index:1}.matrix td{padding:0;border:0}.matrix .empty{text-align:center;color:#718198}.pair-cell{display:flex;flex-direction:column;align-items:center;gap:4px;width:100%;min-width:108px;border-color:transparent;padding:12px 8px}.pair-cell.good{background:#164b43}.pair-cell.bad{background:#563043}.pair-cell.selected{outline:2px solid #9bcbff}.pair-cell:hover{border-color:#c1d8f1}.pair-rate{font-weight:700;font-size:1rem}.pair-count{font-size:.75rem;color:#d1dbea}.pair-help{font-size:.85rem}.pair-details{border-top:1px solid #334153;margin-top:16px;padding-top:8px}.pair-details h3{margin-top:8px}
+</style>
 </head>
 <body>
 <h1>Sequence</h1><p>Explore saved agents, experiment metrics, and each decision in a recorded game.</p>
 <div id="error" class="error" role="alert"></div>
 <section><h2>Trained agents</h2><div id="models">Loading…</div></section>
-<section><h2>Evaluation & tournaments</h2><label for="runs">Experiment </label><select id="runs"><option value="">Select a run</option></select><div id="standings" class="scroll"></div></section>
+<section><h2>Evaluation & tournaments</h2><label for="runs">Experiment </label><select id="runs"><option value="">Select a run</option></select><div id="standings" class="scroll"></div>
+<div id="pairwise" hidden>
+<h3>Head-to-head results</h3>
+<div class="controls pair-controls"><label for="pairwise-metric">Show</label><select id="pairwise-metric"><option value="win_rate">Win rate</option><option value="score_rate">Score rate</option></select><a id="pairwise-download">Download pairwise CSV</a><button id="clear-pair" hidden>Show all games</button></div>
+<p id="pairwise-help" class="pair-help"></p>
+<div id="pairwise-matrix" class="scroll"></div>
+<div id="pairwise-details" class="pair-details" aria-live="polite"></div>
+</div></section>
 <main>
 <section>
 <h2>Replay explorer</h2>
@@ -30,11 +41,56 @@
 'use strict';
 const $=id=>document.getElementById(id);
 let record=null, cards=[], timer=null, requestVersion=0, folderRequestVersion=0, runRequestVersion=0;
+let activeRun=null, pairwise=null, pairFilter=null;
 const duration=d=>d?d.secs+d.nanos/1e9:0;
 async function api(path){const response=await fetch(path);if(!response.ok)throw Error(await response.text());return response.json()}
 function failed(error){$('error').textContent=error.message;stop()}
 function option(select,value,label=value){const node=document.createElement('option');node.value=value;node.textContent=label;select.append(node)}
 function table(headers,rows){const table=document.createElement('table');const head=table.createTHead().insertRow();headers.forEach(text=>{const th=document.createElement('th');th.textContent=text;head.append(th)});const body=table.createTBody();rows.forEach(row=>{const tr=body.insertRow();row.forEach(text=>{const td=tr.insertCell();td.textContent=text})});return table}
+const percent=value=>value==null?'—':`${(value*100).toFixed(1)}%`;
+function agentLabel(agent){return pairwise.agents.filter(a=>a.id===agent.id).length>1?`${agent.id} [${agent.index}]`:agent.id}
+function renderPairDetails(){
+ const container=$('pairwise-details');container.replaceChildren();
+ if(!pairFilter){container.textContent='Select a cell for seat-specific statistics and the matching replays.';return}
+ const [a,b]=pairFilter,cell=pairwise.matrix[a][b],heading=document.createElement('h3');
+ heading.textContent=`${agentLabel(pairwise.agents[a])} vs ${agentLabel(pairwise.agents[b])}`;container.append(heading);
+ const rows=[['All seats',cell],['As Red',cell.as_red],['As Blue',cell.as_blue]].map(([label,s])=>[label,s.games,s.completed,s.wins,s.losses,s.draws,s.truncated,s.aborted,percent(s.win_rate),percent(s.score_rate),s.win_rate_ci95?s.win_rate_ci95.map(percent).join(' – '):'—']);
+ const scroll=document.createElement('div');scroll.className='scroll';scroll.append(table(['Row agent','Games','Completed','Wins','Losses','Draws','Truncated','Aborted','Win rate','Score rate','95% win interval'],rows));container.append(scroll);
+ const note=document.createElement('p');note.className='pair-help';note.textContent=`Row agent mean move: ${cell.mean_move_ms==null?'—':cell.mean_move_ms.toFixed(3)+' ms'} · max move: ${cell.max_move_ms.toFixed(3)} ms · mean actions: ${cell.mean_actions.toFixed(1)} · mean turns: ${cell.mean_turns.toFixed(1)} · total reward: ${cell.reward.toFixed(1)}. Confidence intervals are 95% Wilson intervals for win probability.`;container.append(note);
+ if(![...$('folders').options].some(o=>o.value===activeRun.id)){const missing=document.createElement('p');missing.textContent='Statistics are available, but this run has no replay folder.';container.append(missing)}
+}
+function renderPairwise(){
+ if(!pairwise)return;
+ const metric=$('pairwise-metric').value,score=metric==='score_rate';
+ $('pairwise-help').textContent=`Rows play against columns. ${score?'Score = (wins + ½ draws) / completed games.':'Win rate = wins / completed games; draws count as non-wins.'} Each cell also shows wins / losses / draws. Unfinished games are excluded from rates. — means unplayed or no completed games. Select a cell to filter replays.`;
+ const matrix=document.createElement('table');matrix.className='matrix';matrix.setAttribute('aria-describedby','pairwise-help');
+ const caption=matrix.createCaption();caption.textContent=`${pairwise.total_games.toLocaleString()} recorded games · row agent's perspective`;
+ const head=matrix.createTHead().insertRow(),corner=document.createElement('th');corner.scope='col';corner.textContent='Row vs column';head.append(corner);
+ for(const agent of pairwise.agents){const th=document.createElement('th');th.scope='col';th.textContent=agentLabel(agent);th.title=agent.name;head.append(th)}
+ const body=matrix.createTBody();
+ for(const row of pairwise.agents){
+  const tr=body.insertRow(),label=document.createElement('th');label.scope='row';label.className='row-label';label.textContent=agentLabel(row);tr.append(label);
+  for(const opponent of pairwise.agents){
+   const td=tr.insertCell(),cell=pairwise.matrix[row.index][opponent.index];
+   if(!cell){td.className='empty';td.textContent='—';td.title=row.index===opponent.index?'Same entrant':'No recorded games';continue}
+   const button=document.createElement('button');button.type='button';button.className='pair-cell';
+   if(cell[metric]!=null)button.classList.add(cell[metric]>.5?'good':cell[metric]<.5?'bad':'neutral');
+   if(pairFilter?.[0]===row.index&&pairFilter?.[1]===opponent.index)button.classList.add('selected');
+   const rate=document.createElement('span');rate.className='pair-rate';rate.textContent=percent(cell[metric]);
+   const counts=document.createElement('span');counts.className='pair-count';counts.textContent=`${cell.wins} / ${cell.losses} / ${cell.draws}`;
+   button.append(rate,counts);button.title=`${agentLabel(row)} vs ${agentLabel(opponent)}: ${cell.completed} completed, ${cell.truncated} truncated, ${cell.aborted} aborted`;
+   button.setAttribute('aria-label',`View ${agentLabel(row)} versus ${agentLabel(opponent)} details and games`);
+   button.onclick=()=>selectPair(row.index,opponent.index).catch(failed);td.append(button);
+  }
+ }
+ $('pairwise-matrix').replaceChildren(matrix);$('clear-pair').hidden=!pairFilter;renderPairDetails();
+}
+async function selectPair(a,b){
+ pairFilter=[a,b];renderPairwise();
+ if([...$('folders').options].some(o=>o.value===activeRun.id)){$('folders').value=activeRun.id;await loadFolder(activeRun)}
+}
+$('pairwise-metric').onchange=renderPairwise;
+$('clear-pair').onclick=()=>{pairFilter=null;renderPairwise();if(activeRun&&$('folders').value===activeRun.id)loadFolder(activeRun).catch(failed)};
 function stop(){clearInterval(timer);timer=null;$('play').textContent='Play'}
 function render(){
  if(!record)return;
@@ -60,12 +116,17 @@ function clearReplay(){
 }
 async function loadFolder(report=null){
  const folder=$('folders').value,version=++folderRequestVersion;
+ report=report||(activeRun?.id===folder?activeRun:null);
  clearReplay();$('games').disabled=true;$('games').replaceChildren();
  option($('games'),'',folder?'Loading games…':'Select a folder first');
  if(!folder)return;
  try{
-  const games=await api('/api/replays/'+encodeURIComponent(folder));
+  let games=await api('/api/replays/'+encodeURIComponent(folder));
   if(version!==folderRequestVersion)return;
+  if(pairFilter&&report&&activeRun?.id===folder){
+   const [a,b]=pairFilter,allowed=new Set(report.games.filter(g=>g.players.includes(a)&&g.players.includes(b)).map(g=>g.replay));
+   games=games.filter(game=>allowed.has(`${folder}/${game}`));
+  }
   $('games').replaceChildren();option($('games'),'',games.length?'Select a game':'No games in this folder');
   const labels=new Map((report?.games||[]).map(g=>[g.replay,`${report.agents[g.players[0]].descriptor.id} vs ${report.agents[g.players[1]].descriptor.id}`]));
   for(const game of games){const id=`${folder}/${game}`;option($('games'),id,labels.has(id)?`${game} · ${labels.get(id)}`:game)}
@@ -81,18 +142,21 @@ async function loadGame(){
   $('download').hidden=false;$('download').href=url;$('download').download=id.split('/').at(-1)+'.json';render();
  }catch(error){if(version===requestVersion)throw error}
 }
-$('folders').onchange=()=>loadFolder().catch(failed);
+$('folders').onchange=()=>{pairFilter=null;renderPairwise();loadFolder().catch(failed)};
 $('games').onchange=()=>loadGame().catch(failed);$('frame').oninput=()=>{stop();render()};$('first').onclick=()=>{stop();seek(0)};$('last').onclick=()=>{stop();seek(record.steps.length)};$('prev').onclick=()=>{stop();seek(Number($('frame').value)-1)};$('next').onclick=()=>{stop();seek(Number($('frame').value)+1)};$('play').onclick=()=>{if(timer){stop();return}if(Number($('frame').value)===record.steps.length)seek(0);$('play').textContent='Pause';timer=setInterval(()=>seek(Number($('frame').value)+1),500)};
-document.addEventListener('keydown',event=>{if(['INPUT','SELECT','TEXTAREA'].includes(event.target.tagName))return;if(event.key==='ArrowLeft'){stop();seek(Number($('frame').value)-1)}if(event.key==='ArrowRight'){stop();seek(Number($('frame').value)+1)}});
-$('runs').onchange=async()=>{
- const id=$('runs').value,version=++runRequestVersion;$('standings').replaceChildren();if(!id)return;
+document.addEventListener('keydown',event=>{if(['INPUT','SELECT','TEXTAREA','BUTTON','A'].includes(event.target.tagName))return;if(event.key==='ArrowLeft'){stop();seek(Number($('frame').value)-1)}if(event.key==='ArrowRight'){stop();seek(Number($('frame').value)+1)}});
+async function loadRun(){
+ const id=$('runs').value,version=++runRequestVersion;$('standings').replaceChildren();$('pairwise').hidden=true;activeRun=null;pairwise=null;pairFilter=null;if(!id)return;
  try{
-  const report=await api('/api/runs/'+encodeURIComponent(id));if(version!==runRequestVersion)return;
+  const [report,summary]=await Promise.all([api('/api/runs/'+encodeURIComponent(id)),api('/api/runs/'+encodeURIComponent(id)+'/pairwise')]);if(version!==runRequestVersion)return;
+  activeRun=report;pairwise=summary;$('pairwise').hidden=false;renderPairwise();
+  $('pairwise-download').href='/api/runs/'+encodeURIComponent(id)+'/pairwise.csv';$('pairwise-download').download=id+'-pairwise.csv';
   const rows=[...report.standings].sort((a,b)=>b.elo-a.elo).map(s=>[s.agent,s.wins,s.losses,s.draws,s.truncated,s.elo.toFixed(1),s.reward.toFixed(1),(duration(s.decision_time)*1000/Math.max(1,s.decisions)).toFixed(3)]);
   $('standings').append(table(['Agent','Wins','Losses','Draws','Truncated','Elo','Reward','Mean ms'],rows));
-  $('folders').value=id;await loadFolder(report);
+  if([...$('folders').options].some(o=>o.value===id)){$('folders').value=id;await loadFolder(report)}
  }catch(error){if(version===runRequestVersion)failed(error)}
-};
+}
+$('runs').onchange=loadRun;
 async function init(){
  const [board,models,folders,runs]=await Promise.all(['/api/board','/api/models','/api/replays','/api/runs'].map(api));
  cards=board;$('models').replaceChildren();
@@ -101,7 +165,9 @@ async function init(){
  $('folders').replaceChildren();option($('folders'),'',folders.length?'Select a folder':'No replay folders yet');
  folders.reverse().forEach(id=>option($('folders'),id));$('folders').disabled=!folders.length;
  runs.reverse().forEach(id=>option($('runs'),id));
- const selected=new URLSearchParams(location.search).get('game');
+ const params=new URLSearchParams(location.search),run=params.get('run');
+ if(run&&runs.includes(run)){$('runs').value=run;await loadRun()}
+ const selected=params.get('game');
  if(selected&&selected.split('/').length===2&&folders.includes(selected.split('/')[0])){
   $('folders').value=selected.split('/')[0];await loadFolder();
   if([...$('games').options].some(option=>option.value===selected)){$('games').value=selected;await loadGame()}

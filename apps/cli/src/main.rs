@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use sequence_agent::InferenceDevice;
 
+mod analysis;
 mod artifacts;
 mod competition;
 mod replay;
@@ -61,6 +62,13 @@ enum Command {
         config: PathBuf,
         #[arg(long, value_parser = parse_device)]
         device: Option<InferenceDevice>,
+    },
+    /// Summarize each agent versus each opponent from an existing run report.
+    Analyze {
+        /// Saved run ID or explicit report.json path; no models/replays needed.
+        run: String,
+        #[arg(long, value_enum, default_value = "table")]
+        format: analysis::Format,
     },
     /// Validate a saved replay and display a board frame (0 = initial deal).
     Replay {
@@ -129,6 +137,7 @@ fn run(cli: Cli) -> Result<()> {
             device,
         ),
         Command::Tournament { config, device } => competition::tournament(&store, &config, device),
+        Command::Analyze { run, format } => analysis::run(&store, &run, format),
         Command::Replay { game, frame, json } => replay::show(&store, &game, frame, json),
         Command::Serve { host, port } => web::serve(&store, host, port),
     }

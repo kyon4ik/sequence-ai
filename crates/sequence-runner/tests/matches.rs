@@ -6,8 +6,8 @@ use sequence_core::{
     Action, Classic, ClassicObservation, Color, Game, GameOutcome, Simple, SimpleObservation,
 };
 use sequence_runner::{
-    EventSink, MatchConfig, MatchEvent, MatchRecord, MatchRunner, Participant, RecordError,
-    RecordedGame, Replay, ReplayError, Reward, Termination,
+    EventSink, MatchConfig, MatchEvent, MatchRecord, MatchRunner, MatchSession, Participant,
+    RecordError, RecordedGame, Replay, ReplayError, Reward, Termination,
 };
 
 fn spec(id: &str, config: AgentConfig) -> AgentSpec {
@@ -15,6 +15,72 @@ fn spec(id: &str, config: AgentConfig) -> AgentSpec {
         descriptor: AgentDescriptor::new(id, id),
         config,
     }
+}
+
+#[test]
+fn stepped_matches_preserve_actions_rewards_limits_and_replays() {
+    let random = spec("random", AgentConfig::Random);
+    for max_actions in [1, 1000] {
+        let config = MatchConfig {
+            max_actions,
+            ..Default::default()
+        };
+        let expected = MatchRunner::<Simple>::default()
+            .run_factories(config.clone(), [&random, &random])
+            .unwrap();
+        let mut agents = config.agent_seeds.map(RandomAgent::from_seed);
+        let mut session =
+            MatchSession::<Simple>::new(config, [random.descriptor(), random.descriptor()])
+                .unwrap();
+        let mut actions = Vec::new();
+        while !session.is_finished() {
+            let game = session.game();
+            game.legal_actions(&mut actions);
+            let action = <RandomAgent as Agent<Simple>>::choose_action(
+                &mut agents[game.current_player() as usize],
+                game.observation(),
+                &actions,
+            )
+            .unwrap();
+            session.step(action, std::time::Duration::ZERO).unwrap();
+        }
+        let actual = session.finish().unwrap();
+        assert_eq!(actual.termination, expected.termination);
+        assert_eq!(actual.header, expected.header);
+        assert_eq!(actual.metrics.actions, expected.metrics.actions);
+        assert_eq!(
+            actual
+                .steps
+                .iter()
+                .map(|s| (s.action, s.rewards, &s.state))
+                .collect::<Vec<_>>(),
+            expected
+                .steps
+                .iter()
+                .map(|s| (s.action, s.rewards, &s.state))
+                .collect::<Vec<_>>()
+        );
+        Replay::<Simple>::new(&actual).unwrap();
+    }
+    let mut session = MatchSession::<Simple>::new(
+        MatchConfig::default(),
+        [random.descriptor(), random.descriptor()],
+    )
+    .unwrap();
+    let error = session
+        .step(Action::Pass, std::time::Duration::ZERO)
+        .unwrap_err();
+    Replay::<Simple>::new(error.partial_record().unwrap()).unwrap();
+    assert!(session.finish().is_err());
+    assert!(
+        MatchSession::<Simple>::new(
+            MatchConfig::default(),
+            [random.descriptor(), random.descriptor()]
+        )
+        .unwrap()
+        .finish()
+        .is_err()
+    );
 }
 
 #[test]

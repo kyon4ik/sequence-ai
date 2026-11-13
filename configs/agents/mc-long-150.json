@@ -1,0 +1,15 @@
+{
+  "descriptor": {
+    "id": "mc-long-150",
+    "name": "Long training: iteration 150",
+    "metadata": {
+      "algorithm": "mc",
+      "training_run": "mc-v1-long-batched",
+      "iteration": "150"
+    }
+  },
+  "config": {
+    "kind": "monte_carlo",
+    "checkpoint": "../../data/models/mc-v1-long-batched/checkpoints/iteration-000150/model.bpk"
+  }
+}
