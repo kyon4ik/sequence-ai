@@ -9,7 +9,7 @@ The workspace follows the intended dependency boundaries:
 | `sequence-core` | Rules, state, legal actions, player observations |
 | `sequence-agent` | Common policy/factory interface, heuristic and neural inference, agent definitions |
 | `sequence-runner` | Individual matches, rewards, event recording, per-match metrics, replay |
-| `sequence-training` | Learning algorithms; currently Monte Carlo self-play using the runner |
+| `sequence-training` | Learning algorithms; currently Monte Carlo training with configurable opponents |
 | `apps/cli` | `sequence` commands, file artifacts, experiment orchestration, local replay explorer |
 
 Dependencies point from training to runner to agent to core. Runner has no Burn
@@ -214,12 +214,130 @@ can decide how to consume them. Seed the tensor device before model construction
 as well as supplying the training seed. Exact GPU reproducibility also depends on
 backend/kernel behavior.
 
+### Training against different opponents
+
+Run the supplied 40% self-play, 20% best, 15% previous, 15% random checkpoint,
+10% greedy experiment:
+
+```sh
+cargo run --release -p sequence-cli -- train --config configs/experiments/mc-mixed.toml
+```
+
+Any training config can specify relative game weights:
+
+```toml
+[training.opponents]
+self_play = 40
+best_checkpoint = 20
+previous_checkpoint = 15
+random_checkpoint = 15
+greedy = 10
+```
+
+Omitting the table uses 100% self-play. Missing entries within a supplied table
+are zero. Weights must be finite and nonnegative, with a positive sum. Each
+iteration uses proportional game counts with largest-remainder rounding (128
+games become 51/26/19/19/13), balanced learner seats per category, and a shuffled,
+seeded schedule. Equal rounding remainders and odd seat counts rotate between
+iterations. Weights describe games; sample proportions differ because self-play
+trains on both seats and all other games train only on the learner's decisions.
+
+The learner uses its epsilon schedule. Frozen opponents use zero exploration.
+Best means the earliest highest-scoring checkpoint under the existing fixed
+random/greedy evaluation. Previous is one snapshot older than the learner's
+current weights: when the learner starts iteration N with checkpoint N−1,
+previous is N−2. Random samples uniformly per game from checkpoints older than
+the current learner. The initial network is checkpoint 0. Categories without an
+available checkpoint temporarily use self-play; reports record these fallbacks.
+Best may coincide with the current learner's weights, with exploration disabled
+on the opponent seat.
+
+Historical weights stay on disk. Rollouts group games into waves of at most four
+distinct frozen opponents, batch inference by model, and restore game order for
+target extraction. Every mixed-training snapshot includes an `opponents/` archive
+and the pool manifest, best checkpoint ID and scheduler RNG in `state.json`.
+The runtime archive moves onto the checkpoint filesystem on first publication;
+immutable weights are hard-linked where possible, with copying as a fallback.
+Each snapshot can be moved and resumed independently, including into a new model
+ID. The opponent mix is part of the learning configuration and must match on
+resume. Legacy self-play snapshots remain resumable with self-play configs.
+
+`report.json` includes per-category and actual-opponent game/sample counts,
+learner seats, learner wins/losses/draws and fallback counts. Self-play outcomes
+use a designated learner seat, while samples include both seats. Periodic
+evaluation separately records random, greedy, and historical scores against the
+initial model, lagged model and incumbent best (duplicate checkpoint IDs are
+evaluated once). Historical games use a separate fixed seed schedule, balanced
+seats and zero exploration; they do not affect best-model selection. Each uses
+`evaluation_games` games, so historical evaluation adds work. The plotting tool
+shows category proportions, samples and training scores, plus fixed-opponent
+evaluation. Use unseen seeds for final strength comparisons.
+
+To give the requested opponent proportions the same influence on gradient
+updates, use [the balanced-sampling config](configs/experiments/mc-balanced.toml),
+or add these settings inside `[training]` (before `[training.opponents]`):
+
+```toml
+sampling = "opponent_mix"
+updates_per_iteration = 64
+```
+
+`sampling = "natural"` is the default. Without a fixed update budget it uses all
+fresh samples once. With `updates_per_iteration`, it samples uniformly with
+replacement from the fresh samples. `opponent_mix` allocates optimization
+samples proportionally to the requested opponent weights and samples uniformly
+with replacement within each category. Categories without fresh samples in a
+small rollout are excluded and the available weights are renormalized. Fallback
+self-play samples keep their requested category. Each iteration shuffles the
+selected samples before gradient batches are formed.
+
+With 64 updates and a batch size of 128, both strategies use exactly 8,192
+optimization samples per iteration. Repeated selections are not additional game
+experience. Reports distinguish fresh `samples`, `optimization_samples` and
+`updates`, including optimization sample counts by opponent. These settings are
+part of the immutable resume configuration. Fixed-budget runs derive episode
+seeds independently of optimization sampling, allowing paired experiments to
+use the same episode seeds even after their policies diverge.
+
+The controlled study runner alternates natural and balanced sampling across
+three training seeds, checks equal update budgets, and evaluates each run's
+best/final weights on an identical unseen seed schedule:
+
+```sh
+cargo build --release -p sequence-cli
+cargo build --release -p sequence-training --features burn --example evaluate
+python3 tools/opponent_study.py run --iterations 100 --seeds 42,43,44 \
+  --updates 64 --games 1000 --device cuda:0
+```
+
+Configurations, training logs, models, exact per-game evaluation seeds/scores,
+and Markdown/CSV/JSON summaries are saved under
+`data/studies/opponent-sampling-20261113/`. Interrupted training resumes into a
+new model ID on rerun; completed runs/evaluations are reused. Use `--output PATH`
+for another study. The summaries include paired bootstrap comparisons grouped by
+game-seed pairs and separate comparisons across training seeds. Three seeds and
+100 iterations provide an exploratory comparison, rather than establishing
+performance at the original 200-iteration horizon.
+
+Rebuild the summary from existing results or export a standalone study figure:
+
+```sh
+python3 tools/opponent_study.py summarize
+uv run tools/plot_opponent_study.py data/studies/opponent-sampling-20261113/summary.json
+```
+
+`sequence-training::mc::evaluate_seeded_baselines` also exposes this batched,
+zero-exploration evaluation for Rust callers. The `evaluate` example accepts a
+JSON manifest listing checkpoint paths, device, game count, inference batch size
+and seeds. It saves summary statistics and per-game scores without full replays.
+
 ## Checks
 
 ```sh
 cargo test --workspace
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+python3 -m unittest discover -s tools/tests
 ```
 
 The CUDA integration check is explicit and requires host GPU access:
@@ -272,7 +390,8 @@ multiple seeds before drawing strength conclusions.
 
 `training.inference_batch_games` (default 16, positive) controls how many games
 advance together during self-play and periodic evaluation. Candidate moves from
-those games share one network forward pass and one synchronized result readback.
+those games using the same policy share one network forward pass and one
+synchronized result readback.
 Set it to 1 for sequential inference. This is independent of `batch_size`, which
 controls gradient updates. The policy remains frozen while collecting an
 iteration's games. Episode seeds are assigned in input order, exploration RNGs

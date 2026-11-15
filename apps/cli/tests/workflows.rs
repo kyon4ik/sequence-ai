@@ -368,6 +368,12 @@ fn invalid_training_configs_fail_before_creating_artifacts() {
         "algorithm = 'mc'\nid = 'x'\n[training]\ninference_batch_games = 0",
         "algorithm = 'mc'\nid = 'x'\n[training]\nbatch_szie = 1",
         "algorithm = 'mc'\nid = 'x'\n[training]\nlearning_rate = nan",
+        "algorithm = 'mc'\nid = 'x'\n[training]\nupdates_per_iteration = 0",
+        "algorithm = 'mc'\nid = 'x'\n[training]\nsampling = 'unknown'",
+        "algorithm = 'mc'\nid = 'x'\n[training.opponents]\ngreedy = -1",
+        "algorithm = 'mc'\nid = 'x'\n[training.opponents]\nself_play = 0",
+        "algorithm = 'mc'\nid = 'x'\n[training.opponents]\ngreedy = nan",
+        "algorithm = 'mc'\nid = 'x'\n[training.opponents]\ngreddy = 10",
         "algorithm = 'mc'\nid = '../x'",
     ] {
         fs::write(&config, text).unwrap();

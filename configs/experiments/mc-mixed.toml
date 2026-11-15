@@ -1,0 +1,24 @@
+algorithm = "mc"
+id = "mc-mixed-v1"
+name = "Monte Carlo agent — mixed opponents"
+device = "cuda:0"
+
+[training]
+iterations = 200
+games_per_iteration = 128
+batch_size = 128
+inference_batch_games = 128
+learning_rate = 0.0003
+epsilon_start = 0.3
+epsilon_end = 0.05
+seed = 42
+evaluation_interval = 10
+evaluation_games = 100 # Per baseline and historical evaluation opponent.
+
+# Relative weights of games. Missing entries in this table are zero.
+[training.opponents]
+self_play = 40
+best_checkpoint = 20
+previous_checkpoint = 15
+random_checkpoint = 15
+greedy = 10

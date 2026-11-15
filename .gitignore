@@ -1,3 +1,4 @@
 /target
 /data/
 /output/playwright/
+__pycache__/

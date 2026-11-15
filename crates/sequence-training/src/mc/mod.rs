@@ -1,5 +1,17 @@
+mod evaluation;
+pub use evaluation::{
+    BaselineEvaluation, EvaluationConfig, EvaluationGame, evaluate_seeded_baselines,
+};
+#[cfg(test)]
+mod mixed_tests;
+mod opponents;
 mod optimizer;
 mod rollout;
+mod sampling;
+pub use sampling::SamplingStrategy;
+
+use opponents::{CheckpointPool, OpponentPolicy, OpponentState};
+pub use opponents::{OpponentEvaluation, OpponentKind, OpponentMetrics, OpponentMix};
 
 use burn::{
     optim::{GradientsParams, ModuleOptimizer},
@@ -11,8 +23,11 @@ use sequence_agent::mc::{EncodedAfterstate, McInferenceMetrics, ValueNet, batch}
 use sequence_core::{Color, Game, GameOutcome, Simple};
 use sequence_runner::{MatchConfig, Termination};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -29,6 +44,10 @@ pub struct TrainingConfig {
     pub seed: u64,
     pub evaluation_interval: usize,
     pub evaluation_games: usize,
+    pub opponents: OpponentMix,
+    pub sampling: SamplingStrategy,
+    /// Fixed full gradient batches per iteration; None uses the fresh sample count.
+    pub updates_per_iteration: Option<usize>,
 }
 
 impl Default for TrainingConfig {
@@ -44,6 +63,9 @@ impl Default for TrainingConfig {
             seed: 42,
             evaluation_interval: 10,
             evaluation_games: 20,
+            opponents: OpponentMix::default(),
+            sampling: SamplingStrategy::Natural,
+            updates_per_iteration: None,
         }
     }
 }
@@ -53,8 +75,19 @@ pub struct IterationMetrics {
     pub iteration: usize,
     pub episodes: usize,
     pub samples: usize,
+    #[serde(default)]
+    pub optimization_samples: usize,
+    #[serde(default)]
+    pub updates: usize,
+    /// Fixed-budget runs derive episode seeds independently of sample selection.
+    #[serde(default)]
+    pub rollout_seed: Option<u64>,
     pub mse: f64,
     pub evaluation_score: Option<f64>,
+    #[serde(default)]
+    pub evaluation_opponents: Vec<OpponentEvaluation>,
+    #[serde(default)]
+    pub opponents: Vec<OpponentMetrics>,
     pub epsilon: f64,
     /// Red wins, Blue wins, draws.
     pub outcomes: [usize; 3],
@@ -82,7 +115,7 @@ pub struct TrainingOutput {
     pub report: TrainingReport,
 }
 
-/// Collect frozen-policy self-play through sequence-runner, then regress on
+/// Collect games against the configured opponent mix, then regress on
 /// actor-relative terminal outcomes. The returned report replaces stdout logging.
 /// The caller owns model/report persistence and device selection.
 pub fn train(
@@ -117,6 +150,15 @@ impl TrainingConfig {
                 "evaluation interval must be positive and games must be positive and even".into(),
             );
         }
+        if let Some(updates) = self.updates_per_iteration
+            && (updates == 0 || updates.checked_mul(self.batch_size).is_none())
+        {
+            return Err(
+                "updates_per_iteration must be positive and its sample budget must fit usize"
+                    .into(),
+            );
+        }
+        self.opponents.validate()?;
         Ok(())
     }
 }
@@ -154,6 +196,8 @@ struct ResumeMetadata {
     rng: Xoshiro256PlusPlus,
     report: TrainingReport,
     best_score: Option<f64>,
+    #[serde(default)]
+    opponents: Option<OpponentState>,
 }
 
 pub struct TrainingCheckpoint<'a> {
@@ -161,6 +205,7 @@ pub struct TrainingCheckpoint<'a> {
     optimizer: &'a ModuleOptimizer,
     metadata: &'a ResumeMetadata,
     best_model: Option<&'a ValueNet>,
+    pool: Option<&'a CheckpointPool>,
 }
 
 impl TrainingCheckpoint<'_> {
@@ -185,6 +230,9 @@ impl TrainingCheckpoint<'_> {
             best.clone()
                 .valid()
                 .save_file(staging.path().join("best.bpk"))?;
+        }
+        if let Some(pool) = self.pool {
+            pool.save(staging.path())?;
         }
         std::fs::write(
             staging.path().join("state.json"),
@@ -212,11 +260,12 @@ pub fn train_resumable(
     let device = device.autodiff();
     let mut optimizer = optimizer::adam();
     let mut metadata = ResumeMetadata {
-        version: 1,
+        version: 2,
         config: config.clone(),
         rng: Xoshiro256PlusPlus::seed_from_u64(config.seed),
         report: TrainingReport::default(),
         best_score: None,
+        opponents: Some(OpponentState::new(config.seed)),
     };
     let mut best_model = None;
     if let Some(path) = resume {
@@ -224,7 +273,7 @@ pub fn train_resumable(
         // Scheduling is an execution choice. All learning settings, including
         // total iterations and the exploration schedule, remain immutable.
         metadata.config.inference_batch_games = config.inference_batch_games;
-        if metadata.version != 1 || metadata.config != *config {
+        if ![1, 2].contains(&metadata.version) || metadata.config != *config {
             return Err("checkpoint version or training configuration differs".into());
         }
         if metadata.report.iterations.len() > config.iterations
@@ -243,13 +292,42 @@ pub fn train_resumable(
             best_model = Some(net.clone().try_load_file(path.join("best.bpk"))?);
         }
     }
+    if metadata.version == 2 && metadata.opponents.is_none() {
+        return Err("checkpoint is missing opponent scheduler state".into());
+    }
+    let opponent_state = metadata
+        .opponents
+        .get_or_insert_with(|| OpponentState::new(config.seed));
+    let mut pool = if config.opponents.uses_history() {
+        Some(CheckpointPool::new()?)
+    } else {
+        None
+    };
+    if let Some(pool) = &mut pool {
+        if let Some(path) = resume {
+            let completed = metadata.report.iterations.len();
+            if opponent_state.checkpoints != (0..=completed).collect::<Vec<_>>()
+                || opponent_state.best_iteration.is_some_and(|i| i > completed)
+                || opponent_state.best_iteration.is_some() != metadata.best_score.is_some()
+            {
+                return Err("invalid opponent checkpoint manifest".into());
+            }
+            pool.restore(path, &opponent_state.checkpoints)?;
+        } else {
+            pool.insert(0, &net)?;
+            opponent_state.checkpoints.push(0);
+        }
+    }
+    metadata.version = 2;
     net = net.train();
     let ResumeMetadata {
         rng,
         report,
         best_score,
+        opponents,
         ..
     } = &mut metadata;
+    let opponent_state = opponents.as_mut().unwrap();
     for iteration in report.iterations.len()..config.iterations {
         let iteration_started = Instant::now();
         let fraction = iteration as f64 / config.iterations.saturating_sub(1).max(1) as f64;
@@ -261,22 +339,33 @@ pub fn train_resumable(
         let mut decision_time = [Duration::ZERO; 2];
         let rollout_started = Instant::now();
 
+        let rollout_seed = config
+            .updates_per_iteration
+            .map(|_| iteration_seed(config.seed, iteration, 0xE915_0DE5));
+        let mut episode_rng = rollout_seed.map(Xoshiro256PlusPlus::seed_from_u64);
+        let match_rng = episode_rng.as_mut().unwrap_or(rng);
         let matches: Vec<_> = (0..config.games_per_iteration)
             .map(|_| MatchConfig {
-                game_seed: rng.random(),
-                agent_seeds: [rng.random(), rng.random()],
+                game_seed: match_rng.random(),
+                agent_seeds: [match_rng.random(), match_rng.random()],
                 ..Default::default()
             })
             .collect();
-        let rollout = rollout::play(
+        let plans =
+            config
+                .opponents
+                .schedule(config.games_per_iteration, iteration, opponent_state);
+        let mut opponent_metrics: BTreeMap<_, OpponentMetrics> = BTreeMap::new();
+        let rollout = rollout::play_opponents(
             &net,
             &device,
             &matches,
             config.inference_batch_games,
             epsilon,
-            None,
+            &plans,
+            pool.as_ref(),
         )?;
-        for record in rollout.records {
+        for (record, plan) in rollout.records.into_iter().zip(&plans) {
             let Termination::Completed(outcome) = record.termination else {
                 return Err("Monte Carlo targets require a completed episode".into());
             };
@@ -290,10 +379,30 @@ pub fn train_resumable(
                 reward[i] += record.metrics.players[i].reward;
                 decision_time[i] += record.metrics.players[i].decision_time;
             }
+            let metrics = opponent_metrics
+                .entry((plan.source, plan.policy))
+                .or_insert_with(|| OpponentMetrics {
+                    source: plan.source,
+                    opponent: plan.policy.id(),
+                    ..Default::default()
+                });
+            metrics.games += 1;
+            metrics.learner_seats[plan.learner_seat] += 1;
+            metrics.fallback_games += usize::from(
+                plan.source != OpponentKind::SelfPlay && plan.policy == OpponentPolicy::SelfPlay,
+            );
+            metrics.outcomes[outcome_index(outcome, plan.learner_seat)] += 1;
             let mut game = Simple::from_seed(record.header.config.game_seed);
             for step in &record.steps {
-                let encoded = EncodedAfterstate::new(game.observation(), step.action)?;
-                samples.push((encoded, terminal_target(outcome, step.actor)));
+                if plan.learns_from(step.actor as usize) {
+                    let encoded = EncodedAfterstate::new(game.observation(), step.action)?;
+                    samples.push((
+                        encoded,
+                        terminal_target(outcome, step.actor),
+                        (plan.source, plan.policy),
+                    ));
+                    metrics.samples += 1;
+                }
                 game.apply(step.action)?;
             }
         }
@@ -301,11 +410,30 @@ pub fn train_resumable(
 
         samples.shuffle(rng);
 
+        let sources: Vec<_> = samples.iter().map(|sample| sample.2.0).collect();
+        let mut selection_rng =
+            Xoshiro256PlusPlus::seed_from_u64(iteration_seed(config.seed, iteration, 0x5A4F_1E50));
+        let selected = sampling::select(
+            &sources,
+            &config.opponents,
+            config.sampling,
+            config
+                .updates_per_iteration
+                .map(|updates| updates * config.batch_size),
+            iteration,
+            &mut selection_rng,
+        );
+        for &index in &selected {
+            opponent_metrics
+                .get_mut(&samples[index].2)
+                .unwrap()
+                .optimization_samples += 1;
+        }
         let mut total_loss = Tensor::<1>::zeros([1], &device.clone().without_autodiff());
         let optimization_started = Instant::now();
-        for minibatch in samples.chunks(config.batch_size) {
-            let inputs: Vec<_> = minibatch.iter().map(|(x, _)| x.clone()).collect();
-            let targets: Vec<_> = minibatch.iter().map(|(_, y)| *y).collect();
+        for minibatch in selected.chunks(config.batch_size) {
+            let inputs: Vec<_> = minibatch.iter().map(|&i| samples[i].0.clone()).collect();
+            let targets: Vec<_> = minibatch.iter().map(|&i| samples[i].1).collect();
             let (board, context) = batch(&inputs, &device);
             let targets =
                 Tensor::<2>::from_data(TensorData::new(targets, [inputs.len(), 1]), &device);
@@ -319,20 +447,28 @@ pub fn train_resumable(
         let mse = total_loss
             .try_into_scalar::<f32>()
             .map_err(|e| format!("reading training loss: {e}"))? as f64
-            / samples.len() as f64;
+            / selected.len() as f64;
         let optimization_time = optimization_started.elapsed();
         let evaluation_started = Instant::now();
         let mut evaluation_inference = McInferenceMetrics::default();
+        let mut evaluation_opponents = Vec::new();
         let evaluation_score = if (iteration + 1).is_multiple_of(config.evaluation_interval)
             || iteration + 1 == config.iterations
         {
-            let (score, inference) = evaluate(
+            let (score, inference, details) = evaluate_baselines(
                 &net,
                 &device,
                 config.evaluation_games,
                 config.inference_batch_games,
             )?;
             evaluation_inference = inference;
+            evaluation_opponents = details;
+            if let Some(pool) = &pool {
+                let (details, inference) =
+                    evaluate_history(&net, &device, config, iteration, opponent_state, pool)?;
+                evaluation_opponents.extend(details);
+                rollout::add_metrics(&mut evaluation_inference, &inference);
+            }
             Some(score)
         } else {
             None
@@ -341,8 +477,13 @@ pub fn train_resumable(
             iteration: iteration + 1,
             episodes: config.games_per_iteration,
             samples: samples.len(),
+            optimization_samples: selected.len(),
+            updates: selected.len().div_ceil(config.batch_size),
+            rollout_seed,
             mse,
             evaluation_score,
+            evaluation_opponents,
+            opponents: opponent_metrics.into_values().collect(),
             epsilon,
             outcomes: results,
             reward,
@@ -363,19 +504,26 @@ pub fn train_resumable(
         {
             *best_score = Some(score);
             best_model = Some(net.clone().valid());
+            opponent_state.best_iteration = Some(iteration + 1);
+        }
+        if let Some(pool) = &mut pool {
+            pool.insert(iteration + 1, &net)?;
+            opponent_state.checkpoints.push(iteration + 1);
         }
         let snapshot_metadata = ResumeMetadata {
-            version: 1,
+            version: 2,
             config: config.clone(),
             rng: rng.clone(),
             report: report.clone(),
             best_score: *best_score,
+            opponents: Some(opponent_state.clone()),
         };
         checkpoint(&TrainingCheckpoint {
             model: &net,
             optimizer: &optimizer,
             metadata: &snapshot_metadata,
             best_model: best_model.as_ref(),
+            pool: pool.as_ref(),
         })?;
     }
 
@@ -386,41 +534,133 @@ pub fn train_resumable(
     })
 }
 
+#[cfg(test)]
 fn evaluate(
     net: &ValueNet,
     device: &Device,
     games: usize,
     batch_games: usize,
 ) -> Result<(f64, McInferenceMetrics), sequence_agent::AgentError> {
+    let (score, metrics, _) = evaluate_baselines(net, device, games, batch_games)?;
+    Ok((score, metrics))
+}
+
+fn evaluate_baselines(
+    net: &ValueNet,
+    device: &Device,
+    games: usize,
+    batch_games: usize,
+) -> Result<(f64, McInferenceMetrics, Vec<OpponentEvaluation>), sequence_agent::AgentError> {
     use sequence_agent::AgentConfig;
-    let mut score = 0.;
+    let mut details = Vec::new();
     let mut metrics = McInferenceMetrics::default();
-    for baseline in [AgentConfig::Random, AgentConfig::greedy()] {
-        let configs: Vec<_> = (0..games)
-            .map(|index| MatchConfig {
-                game_seed: 0xEA10_0000 + (index / 2) as u64,
-                agent_seeds: [0xEA11_0000 + index as u64, 0xEA12_0000 + index as u64],
-                ..Default::default()
+    for (name, baseline) in [
+        ("random", AgentConfig::Random),
+        ("greedy", AgentConfig::greedy()),
+    ] {
+        let configs = evaluation_configs(games, 0xEA10_0000);
+        let rollout = rollout::play(net, device, &configs, batch_games, 0., Some(&baseline))?;
+        rollout::add_metrics(&mut metrics, &rollout.inference);
+        details.push(evaluation_summary(name.into(), &rollout.records)?);
+    }
+    Ok((
+        details
+            .iter()
+            .map(|d| d.outcomes[0] as f64 + 0.5 * d.outcomes[2] as f64)
+            .sum::<f64>()
+            / (2 * games) as f64,
+        metrics,
+        details,
+    ))
+}
+
+fn evaluate_history(
+    net: &ValueNet,
+    device: &Device,
+    config: &TrainingConfig,
+    completed: usize,
+    state: &OpponentState,
+    pool: &CheckpointPool,
+) -> Result<(Vec<OpponentEvaluation>, McInferenceMetrics), sequence_agent::AgentError> {
+    use opponents::OpponentPlan;
+    // Evaluate the initial policy, a lagged policy and the incumbent best. The
+    // moving historical panel is diagnostic and never changes best selection.
+    let mut iterations = BTreeSet::from([0]);
+    iterations.extend(completed.checked_sub(1));
+    iterations.extend(state.best_iteration);
+    let mut details = Vec::new();
+    let mut inference = McInferenceMetrics::default();
+    for iteration in iterations
+        .into_iter()
+        .filter(|i| state.checkpoints.contains(i))
+    {
+        let policy = OpponentPolicy::Checkpoint(iteration);
+        let configs = evaluation_configs(config.evaluation_games, 0xEB10_0000);
+        let plans: Vec<_> = (0..configs.len())
+            .map(|index| OpponentPlan {
+                source: OpponentKind::RandomCheckpoint,
+                policy,
+                learner_seat: index % 2,
             })
             .collect();
-        let rollout = rollout::play(net, device, &configs, batch_games, 0., Some(&baseline))?;
-        metrics.decisions += rollout.inference.decisions;
-        metrics.batches += rollout.inference.batches;
-        metrics.candidates += rollout.inference.candidates;
-        metrics.encoding_time += rollout.inference.encoding_time;
-        metrics.prediction_time += rollout.inference.prediction_time;
-        for (index, record) in rollout.records.iter().enumerate() {
-            score += match record.termination {
-                Termination::Completed(GameOutcome::Won(color)) if color as usize == index % 2 => {
-                    1.
-                }
-                Termination::Completed(GameOutcome::Draw) => 0.5,
-                Termination::Completed(_) => 0.,
-                _ => return Err("evaluation did not complete".into()),
-            };
-        }
+        let output = rollout::play_opponents(
+            net,
+            device,
+            &configs,
+            config.inference_batch_games,
+            0.,
+            &plans,
+            Some(pool),
+        )?;
+        rollout::add_metrics(&mut inference, &output.inference);
+        details.push(evaluation_summary(policy.id(), &output.records)?);
     }
-    Ok((score / (2 * games) as f64, metrics))
+    Ok((details, inference))
+}
+
+fn evaluation_configs(games: usize, base: u64) -> Vec<MatchConfig> {
+    (0..games)
+        .map(|index| MatchConfig {
+            game_seed: base + (index / 2) as u64,
+            agent_seeds: [
+                base + 0x1_0000 + index as u64,
+                base + 0x2_0000 + index as u64,
+            ],
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn evaluation_summary(
+    opponent: String,
+    records: &[sequence_runner::MatchRecord],
+) -> Result<OpponentEvaluation, sequence_agent::AgentError> {
+    let mut outcomes = [0; 3];
+    for (index, record) in records.iter().enumerate() {
+        let Termination::Completed(outcome) = record.termination else {
+            return Err("evaluation did not complete".into());
+        };
+        outcomes[outcome_index(outcome, index % 2)] += 1;
+    }
+    Ok(OpponentEvaluation {
+        opponent,
+        games: records.len(),
+        outcomes,
+        score: (outcomes[0] as f64 + 0.5 * outcomes[2] as f64) / records.len() as f64,
+    })
+}
+
+fn outcome_index(outcome: GameOutcome, learner: usize) -> usize {
+    match outcome {
+        GameOutcome::Won(color) if color as usize == learner => 0,
+        GameOutcome::Won(_) => 1,
+        GameOutcome::Draw => 2,
+        GameOutcome::InProgress => unreachable!("completed episodes only"),
+    }
+}
+
+fn iteration_seed(seed: u64, iteration: usize, domain: u64) -> u64 {
+    seed ^ (iteration as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ domain
 }
 
 fn terminal_target(outcome: GameOutcome, actor: Color) -> f32 {
@@ -479,6 +719,17 @@ mod tests {
             },
         )
         .unwrap();
+        // Exercise a genuine v1 checkpoint: older configs have no opponent table
+        // or scheduler state. Continuation must retain the old RNG sequence.
+        let state_path = saved.join("state.json");
+        let mut legacy: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(&state_path).unwrap()).unwrap();
+        legacy["version"] = 1.into();
+        legacy.as_object_mut().unwrap().remove("opponents");
+        for field in ["opponents", "sampling", "updates_per_iteration"] {
+            legacy["config"].as_object_mut().unwrap().remove(field);
+        }
+        std::fs::write(state_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         // A fresh model has fresh parameter IDs; restoring must reconnect Adam state too.
         let mut resume_config = config.clone();
         resume_config.inference_batch_games = 3;
@@ -551,8 +802,12 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("inference_batch_games");
+        for field in ["opponents", "sampling", "updates_per_iteration"] {
+            legacy.as_object_mut().unwrap().remove(field);
+        }
         let mut config: TrainingConfig = serde_json::from_value(legacy).unwrap();
         assert_eq!(config.inference_batch_games, 16);
+        assert_eq!(config.opponents, OpponentMix::default());
         config.inference_batch_games = 0;
         assert!(config.validate().is_err());
         let mut metric = serde_json::json!({"iteration": 1, "episodes": 1, "samples": 1, "mse": 1., "evaluation_score": null, "epsilon": 1., "outcomes": [1,0,0], "reward": [1.,-1.]});

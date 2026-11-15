@@ -80,6 +80,13 @@ mod enabled {
             let metrics = checkpoint.report().iterations.last().unwrap();
             checkpoint.save(&checkpoints.join(format!("iteration-{:06}", metrics.iteration)))?;
             eprintln!("iteration {}/{}  mse={:.6}  epsilon={:.3}  samples={}  evaluation={:?}  rollout={:.2}s  optimize={:.2}s  eval={:.2}s  inference_batches={}  elapsed={:.2}s", metrics.iteration, experiment.training.iterations, metrics.mse, metrics.epsilon, metrics.samples, metrics.evaluation_score, metrics.rollout_time.as_secs_f64(), metrics.optimization_time.as_secs_f64(), metrics.evaluation_time.as_secs_f64(), metrics.rollout_inference.batches, metrics.elapsed.as_secs_f64());
+            let mut counts = std::collections::BTreeMap::new();
+            let mut fallbacks = 0;
+            for opponent in &metrics.opponents {
+                *counts.entry(opponent.source).or_insert(0usize) += opponent.games;
+                fallbacks += opponent.fallback_games;
+            }
+            eprintln!("  opponents={counts:?}  self-play fallbacks={fallbacks}");
             Ok(())
         }).map_err(|e| anyhow!("training failed: {e}"))?;
         if let Some(best) = output.best_model {

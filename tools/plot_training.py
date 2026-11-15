@@ -136,15 +136,16 @@ def build_panels(metrics, comparisons):
             line("10-iteration mean", x, rolling([m["mse"] for m in metrics]), COLORS[1])]},
         {"title": "Exploration schedule", "ylabel": "Epsilon", "series": [
             line("Random-action probability", x, [m["epsilon"] for m in metrics], COLORS[3])]},
-        {"title": "Self-play results (the policy plays both seats)", "ylabel": "Fraction of episodes", "range": [0, 1], "series": [
+        {"title": "Training outcomes by seat", "ylabel": "Fraction of episodes", "range": [0, 1], "series": [
             line(name, x, [m["outcomes"][i] / m["episodes"] for m in metrics], color)
             for i, (name, color) in enumerate(zip(["Red wins", "Blue wins", "Draws"], [COLORS[1], COLORS[0], COLORS[2]]))]},
         {"title": "Iteration timing (excludes checkpoint writes)", "ylabel": "Seconds", "series": [
-            line("Self-play + sample extraction", x, [seconds(m["rollout_time"]) for m in metrics], COLORS[0]),
+            line("Rollout + sample extraction", x, [seconds(m["rollout_time"]) for m in metrics], COLORS[0]),
             line("Weight updates", x, [seconds(m["optimization_time"]) for m in metrics], COLORS[1]),
             line("Periodic evaluation", [m["iteration"] for m in timed_evaluations], [seconds(m["evaluation_time"]) for m in timed_evaluations], COLORS[2])]},
         {"title": "Collected training data", "ylabel": "Afterstate samples", "series": [
-            line("Samples per iteration", x, [m["samples"] for m in metrics], COLORS[0])]},
+            line("Fresh samples", x, [m["samples"] for m in metrics], COLORS[0]),
+            line("Optimization samples", x, [m.get("optimization_samples") or None for m in metrics], COLORS[1])]},
         {"title": "Inference timing (available after the implementation change)", "ylabel": "Seconds per iteration", "series": [
             line("CPU candidate encoding", x, [seconds(m["rollout_inference"]["encoding_time"]) if m.get("rollout_inference", {}).get("decisions") else None for m in metrics], COLORS[1]),
             line("Pack + upload + predict + readback", x, [seconds(m["rollout_inference"]["prediction_time"]) if m.get("rollout_inference", {}).get("decisions") else None for m in metrics], COLORS[0])]},
@@ -155,6 +156,36 @@ def build_panels(metrics, comparisons):
         comparison_title = f'Greedy evaluation: {comparisons[0]["device"]}, seed {comparisons[0]["seed"]} (95% intervals)'
     panels.append({"title": comparison_title, "ylabel": "Win rate", "range": [0, 1],
                    "bars": comparisons, "labels": labels, "series": []})
+    if any(m.get("opponents") for m in metrics):
+        sources = ["self_play", "best_checkpoint", "previous_checkpoint", "random_checkpoint", "greedy"]
+        colors = COLORS + ["#b45309"]
+        def grouped(metric, source):
+            return [entry for entry in metric.get("opponents", []) if entry["source"] == source]
+
+        panels.extend([
+            {"title": "Evaluation against fixed opponents", "ylabel": "Score", "range": [0, 1], "series": [
+                line(label, x, [next((e["score"] for e in m.get("evaluation_opponents", []) if e["opponent"] == opponent), None) for m in metrics], color)
+                for opponent, label, color in [("random", "Random", COLORS[0]), ("greedy", "Greedy", COLORS[1]), ("iteration-000000", "Initial model", COLORS[2])]]},
+            {"title": "Requested opponent mix (includes recorded fallbacks)", "ylabel": "Fraction of games", "range": [0, 1], "series": [
+                line(source.replace("_", " "), x, [sum(e["games"] for e in grouped(m, source)) / m["episodes"] if m.get("opponents") else None for m in metrics], color)
+                for source, color in zip(sources, colors)]},
+            {"title": "Training score by category (exploration enabled)", "ylabel": "Learner score", "range": [0, 1], "series": [
+                line(source.replace("_", " "), x, [
+                    sum(e["outcomes"][0] + .5 * e["outcomes"][2] for e in grouped(m, source)) / sum(e["games"] for e in grouped(m, source))
+                    if sum(e["games"] for e in grouped(m, source)) else None for m in metrics], color)
+                for source, color in zip(sources, colors)]},
+            {"title": "Training samples by requested opponent category", "ylabel": "Samples", "series": [
+                line(source.replace("_", " "), x, [sum(e["samples"] for e in grouped(m, source)) if m.get("opponents") else None for m in metrics], color)
+                for source, color in zip(sources, colors)]},
+        ])
+    if any(m.get("optimization_samples") for m in metrics):
+        panels.extend([
+            {"title": "Samples used for updates by requested opponent category", "ylabel": "Optimization samples", "series": [
+                line(source.replace("_", " "), x, [sum(e.get("optimization_samples", 0) for e in grouped(m, source)) if m.get("optimization_samples") else None for m in metrics], color)
+                for source, color in zip(sources, colors)]},
+            {"title": "Gradient update budget", "ylabel": "Updates", "series": [
+                line("Updates per iteration", x, [m.get("updates") or None for m in metrics], COLORS[0])]},
+        ])
     return panels
 
 
@@ -188,8 +219,9 @@ def export_csv(metrics, path):
 
 def render(panels, prefix, title, note, timing_start):
     plt.rcParams.update({"font.size": 9, "axes.spines.top": False, "axes.spines.right": False})
-    fig, axes = plt.subplots(4, 2, figsize=(17, 16), constrained_layout=True)
-    interactive = make_subplots(rows=4, cols=2, subplot_titles=[p["title"] for p in panels], vertical_spacing=0.075, horizontal_spacing=0.09)
+    rows = math.ceil(len(panels) / 2)
+    fig, axes = plt.subplots(rows, 2, figsize=(17, rows * 4), constrained_layout=True)
+    interactive = make_subplots(rows=rows, cols=2, subplot_titles=[p["title"] for p in panels], vertical_spacing=0.075, horizontal_spacing=0.09)
     for index, (panel, axis) in enumerate(zip(panels, axes.flat)):
         row, col = index // 2 + 1, index % 2 + 1
         axis.set_title(panel["title"], loc="left", fontsize=10, pad=12)
@@ -236,22 +268,23 @@ def render(panels, prefix, title, note, timing_start):
     fig.savefig(prefix.with_suffix(".png"), dpi=150)
     fig.savefig(prefix.with_suffix(".svg"))
     plt.close(fig)
-    interactive.update_layout(title={"text": title}, height=1700, width=None, template="plotly_white",
+    interactive.update_layout(title={"text": title}, height=rows * 425, width=None, template="plotly_white",
                               margin={"t": 100, "b": 50}, hovermode="closest", legend={"orientation": "h", "y": -.055})
     # Include Plotly itself so opening the artifact needs no server or internet.
     chart = interactive.to_html(full_html=False, include_plotlyjs=True, config={"responsive": True, "displaylogo": False})
     page = f'''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)}</title><style>body{{font:15px system-ui,sans-serif;max-width:1500px;margin:24px auto;padding:0 20px;color:#172033}}p,li{{line-height:1.6}}a{{color:#2563eb}}.note{{padding:14px;background:#f1f5f9;border-radius:8px}}</style>
 <h1>{html.escape(title)}</h1><p>{html.escape(note)}</p><p>Hover for values, drag to zoom, double-click to reset, and click legend entries to toggle lines.</p>
-<p class="note">Periodic evaluation averages scores against random and greedy; historical reports do not separate those opponents. Training MSE measures fit to changing self-play data. It is not held-out playing strength. Earlier runs lack the new inference timers; gaps mean unmeasured, not zero.</p>
+<p class="note">Periodic evaluation averages scores against random and greedy; historical reports do not separate those opponents. Training MSE measures fit to changing rollout data. Opponent weights describe games, while self-play contributes samples from both seats. Missing historical opponents fall back to self-play; the CSV retains actual opponents and fallback counts. It is not held-out playing strength. Earlier runs lack the new inference timers; gaps mean unmeasured, not zero.</p>
 <p><a href="{html.escape(prefix.with_suffix('.png').name)}">PNG</a> · <a href="{html.escape(prefix.with_suffix('.svg').name)}">SVG</a> · <a href="{html.escape(prefix.with_suffix('.csv').name)}">All recorded metrics (CSV)</a></p>
 {chart}<h2>What is recorded</h2><ul>
 <li>Per iteration: episodes, afterstate samples, MSE, epsilon, Red/Blue wins and draws, cumulative rewards and decision time by seat.</li>
 <li>Strength: periodic evaluation score (win 1, draw 0.5, loss 0), averaged over equal numbers of random and greedy games, with fixed evaluation seeds and balanced seats.</li>
-<li>Timing: self-play/sample extraction, optimization, evaluation and iteration elapsed time. Iteration time excludes checkpoint writes.</li>
+<li>Timing: rollout/sample extraction, optimization, evaluation and iteration elapsed time. Iteration time excludes checkpoint writes.</li>
 <li>Detailed inference: decisions, forward-pass batches, candidate afterstates, encoding time, and combined packing/upload/prediction/readback wall time. This does not isolate GPU kernel time.</li>
+<li>New training reports: fresh and optimization sample counts, actual gradient updates, requested opponent categories, actual checkpoint IDs, fallback counts, games, samples, learner seats, wins/losses/draws, and separate baseline/historical evaluation scores. Training category scores use exploration and changing opponents; they are not held-out strength.</li>
 <li>Separate evaluation/tournaments: wins/losses/draws/truncations, rewards, per-run Elo, decisions, mean/max move time, actions/turns, and complete game replays.</li></ul>
-<p>Not recorded: historical per-opponent evaluation scores, held-out loss, policy entropy, gradient norms, or GPU-only compute/transfer times. Confidence bars show 95% Wilson intervals for win rate; draws count as non-wins.</p></html>'''
+<p>Not recorded in older reports: per-opponent evaluation scores. Not recorded: held-out loss, policy entropy, gradient norms, or GPU-only compute/transfer times. Confidence bars show 95% Wilson intervals for win rate; draws count as non-wins.</p></html>'''
     prefix.with_suffix(".html").write_text(page)
 
 
