@@ -17,14 +17,18 @@ current 0.0001 default. See [research protocols](../research/README.md).
 ## Experiment file and paths
 
 Training reads TOML with `algorithm = "mc"`, a required `id`, an optional `name`,
-a `device` (default `"cpu"`), `checkpoint_interval` (default 1), and an optional
+a `device` (default `"cpu"`), `checkpoint_interval` (default 10),
+`keep_checkpoints` (default 2; 0 keeps all), and an optional
 `[training]` table. Monte Carlo on
 Simple rules is the only implemented training algorithm; PPO and DQN names fail
 validation. Unknown fields and invalid hyperparameters are rejected.
 
 `--id`, `--device`, `--seed`, and `--checkpoint-interval` override the experiment
-file. The interval must be positive; full checkpoints are saved at that interval
-and at the final iteration. `progress.json` is updated every iteration. IDs contain 1–128 ASCII
+file. `--keep-checkpoints` overrides retention. The interval must be positive;
+full checkpoints are saved at that interval and at the final iteration. After
+successful publication, older checkpoints are removed to retain only the newest
+`keep_checkpoints` snapshots. Use 0 for studies that reference intermediate
+checkpoints. `progress.json` is updated every iteration. IDs contain 1–128 ASCII
 letters, digits, hyphens, or underscores and cannot overwrite existing models.
 The resolved experiment is saved as `experiment.json`.
 
@@ -215,6 +219,11 @@ be strictly between zero and one.
 Complete replay-enabled snapshots include `replay.bin`; missing or malformed replay
 state fails resumption rather than silently resetting the buffer. Normal resume
 continues to require the same replay and other learning settings.
+Version-4 checkpoints pack the 450 exact half-integer input features into four bits
+each and the outcome into one byte (226 bytes/sample instead of 1,804), then gzip
+the stream. This is lossless for the current encoder; model weights and Adam state
+remain full precision. Older training checkpoint versions are rejected on resume;
+their weight files remain usable for inference.
 
 ## Inference batching and timing
 
@@ -250,5 +259,8 @@ See [GPU measurements and benchmark instructions](../research/benchmarks.md) for
 Tournament TOML accepts `agents` (at least two references), `games_per_pair`
 (default 100), `seed` (42), `max_actions` (1000), `device` (`"cpu"`),
 `initial_elo` (1000), and `elo_k` (32). Unknown fields are rejected.
+`save_replays` defaults to false; set it to true or pass `--save-replays` to
+record compressed full games. Evaluation and tournament reports always include
+each game's seeds, outcomes and metrics.
 `--device` overrides the config. See [tournament behavior](usage.md#evaluate-and-run-tournaments)
 for seat scheduling, truncation, and run-local Elo.

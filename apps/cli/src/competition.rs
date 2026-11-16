@@ -80,7 +80,8 @@ struct Report {
 
 #[derive(Serialize)]
 struct GameEntry {
-    replay: String,
+    replay: Option<String>,
+    config: MatchConfig,
     /// Red then Blue, as indices into agents/standings.
     players: [usize; 2],
     termination: sequence_runner::Termination,
@@ -97,6 +98,7 @@ struct LeagueConfig {
     device: String,
     initial_elo: f64,
     elo_k: f64,
+    save_replays: bool,
 }
 
 impl Default for LeagueConfig {
@@ -109,6 +111,7 @@ impl Default for LeagueConfig {
             device: "cpu".into(),
             initial_elo: 1000.,
             elo_k: 32.,
+            save_replays: false,
         }
     }
 }
@@ -120,6 +123,7 @@ pub fn evaluate(
     seed: u64,
     max_actions: usize,
     device: InferenceDevice,
+    save_replays: bool,
 ) -> Result<()> {
     let specs = agents
         .into_iter()
@@ -134,14 +138,21 @@ pub fn evaluate(
             games_per_pair: games,
             seed,
             max_actions,
+            save_replays,
             ..Default::default()
         },
         device,
     )
 }
 
-pub fn tournament(store: &Store, path: &Path, device: Option<InferenceDevice>) -> Result<()> {
-    let config: LeagueConfig = read_toml(path)?;
+pub fn tournament(
+    store: &Store,
+    path: &Path,
+    device: Option<InferenceDevice>,
+    save_replays: bool,
+) -> Result<()> {
+    let mut config: LeagueConfig = read_toml(path)?;
+    config.save_replays |= save_replays;
     let device = device
         .map(Ok)
         .unwrap_or_else(|| parse_device(&config.device))
@@ -230,7 +241,9 @@ fn run(
                 let record = match runner.run(match_config, participants) {
                     Ok(record) => record,
                     Err(error) => {
-                        if let Some(partial) = error.partial_record() {
+                        if config.save_replays
+                            && let Some(partial) = error.partial_record()
+                        {
                             store.save_replay(&replay, partial)?;
                         }
                         report.elapsed = started.elapsed();
@@ -238,7 +251,9 @@ fn run(
                         return Err(error.into());
                     }
                 };
-                store.save_replay(&replay, &record)?;
+                if config.save_replays {
+                    store.save_replay(&replay, &record)?;
+                }
                 for (seat, index) in players.into_iter().enumerate() {
                     report.standings[index].record(&record, seat);
                 }
@@ -255,7 +270,8 @@ fn run(
                     report.standings[players[1]].elo -= delta;
                 }
                 report.games.push(GameEntry {
-                    replay,
+                    replay: config.save_replays.then_some(replay),
+                    config: record.header.config,
                     players,
                     termination: record.termination,
                     metrics: record.metrics,
@@ -300,10 +316,10 @@ fn run(
         );
     }
     println!("Report: {}", dir.join("report.json").display());
-    if let Some(game) = report.games.first() {
+    if let Some(replay) = report.games.first().and_then(|game| game.replay.as_ref()) {
         println!(
             "Replay: sequence --data-dir {:?} replay {}",
-            store.root, game.replay
+            store.root, replay
         );
     }
     Ok(())

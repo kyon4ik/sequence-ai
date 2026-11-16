@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use sequence_agent::{AgentConfig, AgentDescriptor, AgentSpec};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -78,7 +79,7 @@ impl Store {
             .context("expected a folder/game replay reference")?;
         validate_id(folder)?;
         validate_id(game)?;
-        Ok(self.root.join("replays").join(format!("{id}.json")))
+        Ok(self.root.join("replays").join(format!("{id}.json.gz")))
     }
 
     pub fn load_replay(&self, reference: &str) -> Result<sequence_runner::MatchRecord> {
@@ -88,13 +89,31 @@ impl Store {
         } else {
             self.replay_path(reference)?
         };
-        read_json(&path)
+        if path.extension().is_some_and(|ext| ext == "gz") {
+            serde_json::from_reader(GzDecoder::new(BufReader::new(File::open(&path)?)))
+                .with_context(|| format!("reading replay {}", path.display()))
+        } else {
+            read_json(&path)
+        }
     }
 
     pub fn save_replay(&self, id: &str, record: &sequence_runner::MatchRecord) -> Result<()> {
         let path = self.replay_path(id)?;
         fs::create_dir_all(path.parent().unwrap())?;
-        write_json(&path, record)
+        let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+        {
+            let mut encoder = GzEncoder::new(
+                BufWriter::new(temporary.as_file_mut()),
+                Compression::default(),
+            );
+            serde_json::to_writer(&mut encoder, record)?;
+            encoder.finish()?.flush()?;
+        }
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist_noclobber(&path)
+            .with_context(|| format!("publishing {}", path.display()))?;
+        Ok(())
     }
 
     pub fn replay_folders(&self) -> Result<Vec<String>> {
@@ -123,7 +142,7 @@ impl Store {
                 && let Some(id) = entry
                     .file_name()
                     .to_str()
-                    .and_then(|name| name.strip_suffix(".json"))
+                    .and_then(|name| name.strip_suffix(".json.gz"))
                 && validate_id(id).is_ok()
             {
                 games.push(id.to_owned());

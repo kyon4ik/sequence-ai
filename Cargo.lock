@@ -5308,6 +5308,7 @@ dependencies = [
  "anyhow",
  "burn",
  "clap",
+ "flate2",
  "rand 0.10.3",
  "sequence-agent",
  "sequence-core",
@@ -5348,6 +5349,7 @@ name = "sequence-training"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "flate2",
  "rand 0.10.3",
  "rand_xoshiro",
  "sequence-agent",

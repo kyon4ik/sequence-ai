@@ -26,7 +26,13 @@ fn success(output: Output) -> Output {
 }
 
 fn read(path: impl AsRef<Path>) -> Value {
-    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    let path = path.as_ref();
+    if path.extension().is_some_and(|ext| ext == "gz") {
+        serde_json::from_reader(flate2::read::GzDecoder::new(fs::File::open(path).unwrap()))
+            .unwrap()
+    } else {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
 }
 
 fn report_path(data: &Path) -> PathBuf {
@@ -39,12 +45,49 @@ fn report_path(data: &Path) -> PathBuf {
 }
 
 #[test]
+fn evaluation_defaults_to_results_and_seeds_without_replays() {
+    let temp = tempfile::tempdir().unwrap();
+    success(cli(
+        temp.path(),
+        &[
+            "eval",
+            "random",
+            "greedy",
+            "--games",
+            "2",
+            "--max-actions",
+            "1",
+        ],
+    ));
+    assert!(!temp.path().join("replays").exists());
+    let report = read(report_path(temp.path()));
+    for game in report["games"].as_array().unwrap() {
+        assert!(game["replay"].is_null());
+        assert!(game["config"]["game_seed"].is_u64());
+        assert_eq!(game["config"]["agent_seeds"].as_array().unwrap().len(), 2);
+    }
+    success(cli(
+        temp.path(),
+        &["analyze", report["id"].as_str().unwrap()],
+    ));
+}
+
+#[test]
 fn evaluation_persists_metrics_seeds_and_replayable_games() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
     success(cli(
         &data,
-        &["eval", "random", "greedy", "--games", "4", "--seed", "7"],
+        &[
+            "eval",
+            "--save-replays",
+            "random",
+            "greedy",
+            "--games",
+            "4",
+            "--seed",
+            "7",
+        ],
     ));
     let report = read(report_path(&data));
     assert_eq!(report["games"].as_array().unwrap().len(), 4);
@@ -59,7 +102,7 @@ fn evaluation_persists_metrics_seeds_and_replayable_games() {
         );
         let id = game["replay"].as_str().unwrap();
         assert!(id.starts_with(&format!("{}/game-", report["id"].as_str().unwrap())));
-        let record = read(data.join("replays").join(format!("{id}.json")));
+        let record = read(data.join("replays").join(format!("{id}.json.gz")));
         let output = success(cli(&data, &["replay", id, "--json"]));
         assert_eq!(
             record,
@@ -101,7 +144,16 @@ fn evaluation_persists_metrics_seeds_and_replayable_games() {
     let other = temp.path().join("repeat");
     success(cli(
         &other,
-        &["eval", "random", "greedy", "--games", "4", "--seed", "7"],
+        &[
+            "eval",
+            "--save-replays",
+            "random",
+            "greedy",
+            "--games",
+            "4",
+            "--seed",
+            "7",
+        ],
     ));
     let repeat = read(report_path(&other));
     for (a, b) in report["games"]
@@ -114,7 +166,7 @@ fn evaluation_persists_metrics_seeds_and_replayable_games() {
         let load = |root: &Path, g: &Value| {
             read(
                 root.join("replays")
-                    .join(format!("{}.json", g["replay"].as_str().unwrap())),
+                    .join(format!("{}.json.gz", g["replay"].as_str().unwrap())),
             )
         };
         let a = load(&data, a);
@@ -196,9 +248,13 @@ fn tournament_resolves_relative_specs_and_excludes_truncations_from_elo() {
 fn errors_are_nonzero_and_replay_corruption_is_detected() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
-    assert!(!cli(&data, &["eval", "missing", "random"]).status.success());
     assert!(
-        !cli(&data, &["eval", "heuristic", "random"])
+        !cli(&data, &["eval", "--save-replays", "missing", "random"])
+            .status
+            .success()
+    );
+    assert!(
+        !cli(&data, &["eval", "--save-replays", "heuristic", "random"])
             .status
             .success()
     );
@@ -207,6 +263,7 @@ fn errors_are_nonzero_and_replay_corruption_is_detected() {
         &data,
         &[
             "eval",
+            "--save-replays",
             "random",
             "random",
             "--games",
@@ -218,14 +275,19 @@ fn errors_are_nonzero_and_replay_corruption_is_detected() {
     let report = read(report_path(&data));
     let id = report["games"][0]["replay"].as_str().unwrap();
     assert!(!cli(&data, &["replay", id, "--frame", "2"]).status.success());
-    let path = data.join("replays").join(format!("{id}.json"));
+    let path = data.join("replays").join(format!("{id}.json.gz"));
     fs::copy(&path, data.join("replays/legacy.json")).unwrap();
     let flat = cli(&data, &["replay", "legacy"]);
     assert!(!flat.status.success());
     assert!(String::from_utf8_lossy(&flat.stderr).contains("folder/game"));
     let mut record = read(&path);
     record["steps"][0]["actor"] = json!("Blue");
-    fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(
+        fs::File::create(path).unwrap(),
+        flate2::Compression::default(),
+    );
+    serde_json::to_writer(&mut encoder, &record).unwrap();
+    encoder.finish().unwrap();
     assert!(!cli(&data, &["replay", id]).status.success());
 }
 
@@ -313,6 +375,7 @@ fn train_save_reload_and_evaluate(device: &str) {
         &data,
         &[
             "eval",
+            "--save-replays",
             "test-model",
             "greedy",
             "--games",
@@ -327,6 +390,7 @@ fn train_save_reload_and_evaluate(device: &str) {
         &data,
         &[
             "eval",
+            "--save-replays",
             model.join("agent.json").to_str().unwrap(),
             "random",
             "--games",

@@ -443,7 +443,16 @@ fn extending_completed_training_matches_fixed_horizon_run() {
 
 #[test]
 fn retained_samples_resume_with_identical_buffer_and_updates() {
-    let device = Device::flex();
+    assert_retained_samples_resume(Device::flex());
+}
+
+#[test]
+#[ignore = "requires an accessible NVIDIA GPU; run outside the sandbox"]
+fn cuda_retained_samples_resume_with_identical_buffer_and_updates() {
+    assert_retained_samples_resume(Device::cuda(0));
+}
+
+fn assert_retained_samples_resume(device: Device) {
     device.seed(901);
     let config = TrainingConfig {
         iterations: 3,

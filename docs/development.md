@@ -38,3 +38,13 @@ cargo test -p sequence-cli cuda_training_cli_roundtrip -- --ignored
 ```
 
 For throughput measurements, see [the GPU benchmark](../research/benchmarks.md).
+
+## Build storage
+
+Cargo retains builds for different profiles, feature sets, compiler/dependency
+versions, tests and examples. Obsolete artifacts are not automatically collected,
+so `target/` grows across development sessions. `cargo clean` removes the build
+cache; the next build recompiles dependencies. `cargo clean --profile dev` clears
+only debug artifacts. Prefer release builds for training and avoid building every
+example unless needed. Incremental compilation is disabled in the development
+profile to reduce cache growth; line-table debug information remains enabled.

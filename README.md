@@ -25,7 +25,7 @@ Run this small CPU experiment to check the complete workflow:
 
 ```sh
 sequence train --config configs/experiments/mc.toml
-sequence eval mc-v1 greedy --games 100
+sequence eval mc-v1 greedy --games 100 --save-replays
 sequence serve --port 8080
 ```
 

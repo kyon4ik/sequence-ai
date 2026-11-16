@@ -25,5 +25,6 @@ toml = "1.1"
 anyhow = "1"
 tiny_http = "0.12"
 sha2 = "0.10.9"
+flate2.workspace = true
 
 tempfile = "3"

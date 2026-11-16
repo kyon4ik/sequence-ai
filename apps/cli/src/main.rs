@@ -50,6 +50,9 @@ enum Command {
         /// Save full state every N iterations, and always at the end.
         #[arg(long, value_parser = positive_usize)]
         checkpoint_interval: Option<usize>,
+        /// Retain N newest complete checkpoints; 0 keeps all (default: 2).
+        #[arg(long)]
+        keep_checkpoints: Option<usize>,
     },
     /// Play two saved agent IDs/spec paths or built-ins: random or greedy.
     Eval {
@@ -63,6 +66,9 @@ enum Command {
         max_actions: usize,
         #[arg(long, default_value = "cpu", value_parser = parse_device)]
         device: InferenceDevice,
+        /// Save compressed full game replays in addition to summary results.
+        #[arg(long)]
+        save_replays: bool,
     },
     /// Evaluate checkpoint panels on shared, paired-seat seeds without replays.
     Panel {
@@ -81,6 +87,9 @@ enum Command {
         config: PathBuf,
         #[arg(long, value_parser = parse_device)]
         device: Option<InferenceDevice>,
+        /// Save compressed full game replays in addition to summary results.
+        #[arg(long)]
+        save_replays: bool,
     },
     /// Summarize each agent versus each opponent from an existing run report.
     Analyze {
@@ -141,6 +150,7 @@ fn run(cli: Cli) -> Result<()> {
             resume,
             seed,
             checkpoint_interval,
+            keep_checkpoints,
         } => training::run(
             &store,
             &config,
@@ -149,6 +159,7 @@ fn run(cli: Cli) -> Result<()> {
                 device,
                 seed,
                 checkpoint_interval,
+                keep_checkpoints,
                 resume,
             },
         ),
@@ -165,6 +176,7 @@ fn run(cli: Cli) -> Result<()> {
             seed,
             max_actions,
             device,
+            save_replays,
         } => competition::evaluate(
             &store,
             [&agent_a, &agent_b],
@@ -172,8 +184,13 @@ fn run(cli: Cli) -> Result<()> {
             seed,
             max_actions,
             device,
+            save_replays,
         ),
-        Command::Tournament { config, device } => competition::tournament(&store, &config, device),
+        Command::Tournament {
+            config,
+            device,
+            save_replays,
+        } => competition::tournament(&store, &config, device, save_replays),
         Command::Analyze { run, format } => analysis::run(&store, &run, format),
         Command::Replay { game, frame, json } => replay::show(&store, &game, frame, json),
         Command::Serve { host, port } => web::serve(&store, host, port),

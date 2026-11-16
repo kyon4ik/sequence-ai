@@ -45,7 +45,7 @@ data/
 │   ├── experiment.json    # Resolved config, overrides and seed
 │   ├── report.json        # Iteration losses, outcomes, rewards and timings
 │   └── progress.json      # Latest completed iteration, updated during training
-├── replays/<run-id>/game-NNNNNN.json # Games grouped by evaluation/tournament run
+├── replays/<run-id>/game-NNNNNN.json.gz # Games grouped by evaluation/tournament run
 └── runs/<run-id>/
     ├── agents.json        # Input agent definitions
     └── report.json        # Seeds, game/replay IDs, results, timings, rewards, Elo
@@ -75,8 +75,11 @@ number gives one extra Red game to the first agent). Each game uses explicit gam
 and policy RNG seeds. Elo starts fresh for every evaluation or tournament, updates
 in scheduling order, and is not a persistent global rating. Action-limited games
 are counted as truncated, never as draws, and do not update Elo. Reports retain
-both aggregate decision timings and each match's metrics; full replay records
-also retain individual move times. Match elapsed time excludes model loading;
+both aggregate decision timings, each match's metrics and exact game/policy seeds.
+Full replays are opt-in: pass `--save-replays` to `eval` or `tournament`, or set
+`save_replays = true` in league TOML. They store compact gzip JSON, retaining
+individual move times and self-contained snapshots. Without recordings, each
+report's `replay` field is null; analysis and the results UI still work. Match elapsed time excludes model loading;
 run elapsed time includes it. Exact timings and GPU results are not reproducible.
 
 ## Checkpoint panels
@@ -178,15 +181,21 @@ opponent hand contents are hidden by the runner's recording contract. The explor
 lists saved evaluation and tournament games; training currently saves aggregate
 metrics, not self-play replays.
 
-Replays live in `replays/<folder>/<game>.json`; evaluation and tournament runs use
+Replays live in `replays/<folder>/<game>.json.gz`; evaluation and tournament runs use
 `<run-id>/game-NNNNNN`. Use `sequence replay <run-id>/game-NNNNNN` or an explicit
 file path. In the browser, select a folder first, then a game inside it. Flat files
-directly under `replays/` are ignored; move them into a folder to browse them.
+directly under `replays/` are ignored. New runs use compressed `.json.gz` files;
+legacy uncompressed records can still be opened by explicit path. The browser API
+and `replay --json` return ordinary decompressed JSON.
 
 ## Training snapshots and evaluation
 
-The CLI atomically publishes complete version-3 training checkpoints. By default
-it saves every iteration; set `--checkpoint-interval N` to save less often.
+The CLI atomically publishes complete version-4 training checkpoints. By default
+it saves every 10 iterations and retains the newest two; set
+`--checkpoint-interval N` and `--keep-checkpoints N` to change this. Set
+`--keep-checkpoints 0` to keep all snapshots for studies that refer to intermediate
+iterations. Old snapshots are pruned only after a new one is published successfully.
+Version 1–3 snapshots cannot be resumed; their model weights still support inference.
 The final iteration is always saved, and `progress.json` is updated every iteration:
 `models/<id>/checkpoints/iteration-NNNNNN/`. It contains `model.bpk`,
 `optimizer.bpk` (Adam moments and step counters), `state.json` (configuration,
@@ -197,7 +206,7 @@ Resume into a new model ID using the original learning configuration:
 
 ```sh
 sequence train --config configs/experiments/mc.toml --id mc-resumed \
-  --resume data/models/mc-v1/checkpoints/iteration-000005
+  --resume data/models/mc-v1/checkpoints/iteration-000010
 ```
 
 By default, exploration decays over the original total iteration count. To
@@ -209,7 +218,7 @@ rejects other learning changes or a reduced iteration budget. The execution sett
 `training.inference_batch_games` may change on resume. The current network has no
 stochastic tensor layers; episode RNGs are recreated from seeds emitted by the
 saved training RNG. CPU continuation is tested against uninterrupted training;
-GPU numerical determinism still depends on kernels and hardware. Resuming requires a complete version-3 checkpoint; inference weights alone
+GPU numerical determinism still depends on kernels and hardware. Resuming requires a complete version-4 checkpoint; inference weights alone
 cannot restore training state.
 
 `training.evaluation_interval` (default 10) controls periodic evaluation; the final

@@ -1,9 +1,10 @@
 //! Bounded retained Monte Carlo samples. Original outcomes are deliberately kept;
 //! these are off-policy labels as the learner and opponent mixture change.
 use super::*;
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use std::{
     collections::VecDeque,
-    io::{Read, Write},
+    io::{BufReader, BufWriter, Read, Write},
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -68,62 +69,67 @@ impl ReplayBuffer {
         }
     }
     pub fn save(&self, path: &Path) -> Result<(), sequence_agent::AgentError> {
-        let mut bytes = Vec::with_capacity(16 + self.samples.len() * 1804);
-        bytes.extend_from_slice(b"SEQRPL01");
-        bytes.extend_from_slice(&(self.len() as u64).to_le_bytes());
+        let file = std::fs::File::create(path)?;
+        let mut writer = GzEncoder::new(BufWriter::new(file), Compression::default());
+        writer.write_all(b"SEQRPL02")?;
+        writer.write_all(&(self.len() as u64).to_le_bytes())?;
         for (encoded, target) in &self.samples {
-            for value in encoded
-                .board
-                .iter()
-                .chain(&encoded.context)
-                .chain(std::iter::once(target))
-            {
-                bytes.extend_from_slice(&value.to_le_bytes());
+            // Encoder features are exact half-integers. Four bits
+            // preserve them without quantizing model inputs or optimizer state.
+            let mut bytes = [0u8; 226];
+            for (index, &value) in encoded.board.iter().chain(&encoded.context).enumerate() {
+                let scaled = value * 2.;
+                if !scaled.is_finite() || !(0.0..=15.0).contains(&scaled) || scaled.fract() != 0. {
+                    return Err("replay feature is outside the packed encoding".into());
+                }
+                bytes[index / 2] |= (scaled as u8) << (4 * (index % 2));
             }
+            bytes[225] = match *target {
+                -1. => 0,
+                0. => 1,
+                1. => 2,
+                _ => return Err("invalid replay target".into()),
+            };
+            writer.write_all(&bytes)?;
         }
-        let mut file = std::fs::File::create(path)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
+        let mut writer = writer.finish()?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
         Ok(())
     }
     pub fn load(path: &Path, capacity: usize) -> Result<Self, sequence_agent::AgentError> {
-        let mut file = std::fs::File::open(path)?;
+        let mut file = GzDecoder::new(BufReader::new(std::fs::File::open(path)?));
         let mut header = [0u8; 16];
         file.read_exact(&mut header)?;
-        if &header[..8] != b"SEQRPL01" {
+        if &header[..8] != b"SEQRPL02" {
             return Err("invalid replay buffer header".into());
         }
         let count = usize::try_from(u64::from_le_bytes(header[8..].try_into()?))?;
-        if count > capacity
-            || count
-                .checked_mul(1804)
-                .and_then(|n| n.checked_add(16))
-                .map(|n| n as u64)
-                != Some(file.metadata()?.len())
-        {
+        if count > capacity {
             return Err("invalid replay buffer length".into());
         }
         let mut result = Self::default();
-        let mut bytes = [0u8; 1804];
+        let mut bytes = [0u8; 226];
         for _ in 0..count {
             file.read_exact(&mut bytes)?;
-            let values: Vec<_> = bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .copied()
-                .map(f32::from_le_bytes)
-                .collect();
-            if values.iter().any(|v| !v.is_finite()) || ![-1., 0., 1.].contains(&values[450]) {
+            if bytes[225] > 2 {
                 return Err("invalid replay sample".into());
             }
+            let values: [f32; 450] = std::array::from_fn(|index| {
+                ((bytes[index / 2] >> (4 * (index % 2))) & 15) as f32 / 2.
+            });
             result.samples.push_back((
                 EncodedAfterstate {
                     board: values[..400].try_into()?,
                     context: values[400..450].try_into()?,
                 },
-                values[450],
+                bytes[225] as f32 - 1.,
             ));
+        }
+        // Read through the gzip footer to check its checksum and reject extra samples.
+        let mut trailing = [0u8; 1];
+        if file.read(&mut trailing)? != 0 {
+            return Err("invalid replay buffer length".into());
         }
         Ok(result)
     }
@@ -136,8 +142,8 @@ mod tests {
     fn buffer_roundtrip_bounds_and_corruption() {
         let mut buffer = ReplayBuffer::default();
         let sample = EncodedAfterstate {
-            board: [0.; 400],
-            context: [0.; 50],
+            board: std::array::from_fn(|i| (i % 16) as f32 / 2.),
+            context: std::array::from_fn(|i| (i % 16) as f32 / 2.),
         };
         buffer.extend((0..12).map(|_| (&sample, 1.)), 8);
         assert_eq!(buffer.len(), 8);
@@ -148,10 +154,12 @@ mod tests {
         assert_eq!(loaded.draws(100, 0.25, 42), buffer.draws(100, 0.25, 42));
         assert_eq!(loaded.draws(100, 0.25, 42).len(), 25);
         assert_eq!(loaded.get(0).0.board, buffer.get(0).0.board);
+        assert_eq!(loaded.get(0).0.context, buffer.get(0).0.context);
+        assert!(std::fs::metadata(&path).unwrap().len() < 16 + 8 * 226);
         assert_eq!(loaded.get(0).1, 1.);
         assert!(ReplayBuffer::load(&path, 7).is_err());
         let mut bytes = std::fs::read(&path).unwrap();
-        bytes[16..20].copy_from_slice(&f32::NAN.to_le_bytes());
+        bytes.truncate(bytes.len() - 4);
         std::fs::write(&path, bytes).unwrap();
         assert!(ReplayBuffer::load(&path, 8).is_err());
         assert!(
@@ -162,5 +170,47 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn packed_format_rejects_invalid_values_targets_and_lengths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replay.bin");
+        for value in [f32::NAN, f32::INFINITY, -0.5, 0.25, 8.] {
+            let sample = EncodedAfterstate {
+                board: [value; 400],
+                context: [0.; 50],
+            };
+            let mut buffer = ReplayBuffer::default();
+            buffer.extend(std::iter::once((&sample, 1.)), 1);
+            assert!(buffer.save(&path).is_err());
+        }
+        let sample = EncodedAfterstate {
+            board: [0.; 400],
+            context: [0.; 50],
+        };
+        let mut buffer = ReplayBuffer::default();
+        buffer.extend([-1., 0., 1.].into_iter().map(|target| (&sample, target)), 3);
+        buffer.save(&path).unwrap();
+        let restored = ReplayBuffer::load(&path, 3).unwrap();
+        assert_eq!(
+            (0..3).map(|i| restored.get(i).1).collect::<Vec<_>>(),
+            [-1., 0., 1.]
+        );
+        let mut raw = Vec::new();
+        GzDecoder::new(std::fs::File::open(&path).unwrap())
+            .read_to_end(&mut raw)
+            .unwrap();
+        for (index, value) in [(16 + 225, 3), (8, 2)] {
+            let mut invalid = raw.clone();
+            invalid[index] = value;
+            let mut encoder = GzEncoder::new(
+                std::fs::File::create(&path).unwrap(),
+                Compression::default(),
+            );
+            encoder.write_all(&invalid).unwrap();
+            encoder.finish().unwrap();
+            assert!(ReplayBuffer::load(&path, 3).is_err());
+        }
     }
 }

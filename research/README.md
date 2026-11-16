@@ -11,8 +11,8 @@ training, publish model specs, or update champion pointers.
 Train each condition with an explicit config, ID, and seed:
 
 ```sh
-sequence train --config configs/experiments/mc-stable.toml --id stable-s42 --seed 42 --checkpoint-interval 50
-sequence train --config configs/experiments/mc-stable.toml --id stable-s43 --seed 43 --checkpoint-interval 50
+sequence train --config configs/experiments/mc-stable.toml --id stable-s42 --seed 42 --checkpoint-interval 50 --keep-checkpoints 0
+sequence train --config configs/experiments/mc-stable.toml --id stable-s43 --seed 43 --checkpoint-interval 50 --keep-checkpoints 0
 ```
 
 Use [resume](../docs/usage.md#training-snapshots-and-evaluation) to continue a

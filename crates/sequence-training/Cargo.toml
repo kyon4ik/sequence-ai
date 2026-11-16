@@ -13,6 +13,7 @@ rand.workspace = true
 rand_xoshiro = { version = "0.8.1", features = ["serde"] }
 serde_json.workspace = true
 tempfile = "3"
+flate2.workspace = true
 
 [features]
 burn = ["dep:burn", "sequence-agent/burn"]

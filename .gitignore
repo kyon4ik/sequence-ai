@@ -1,5 +1,6 @@
 /target
 /data/
+/archives/
 /output/playwright/
 __pycache__/
 /.cargo/config.toml

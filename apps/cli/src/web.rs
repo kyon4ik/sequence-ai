@@ -124,7 +124,10 @@ fn route(store: &Store, path: &str) -> Result<Reply> {
         _ => {
             if let Some(id) = path.strip_prefix("/api/replays/") {
                 if id.contains('/') {
-                    return json_file(&store.replay_path(id)?);
+                    if !store.replay_path(id)?.is_file() {
+                        return Ok((404, "text/plain", b"Not found".to_vec()));
+                    }
+                    return json_reply(store.load_replay(id)?);
                 }
                 validate_id(id)?;
                 if !store.root.join("replays").join(id).is_dir() {
@@ -209,14 +212,32 @@ mod tests {
 
     #[test]
     fn replays_are_browsed_by_folder_and_flat_files_are_ignored() {
+        use sequence_core::Game;
+
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().to_path_buf());
         fs::create_dir_all(dir.path().join("replays/run-1")).unwrap();
         fs::create_dir_all(dir.path().join("replays/run-2")).unwrap();
         fs::create_dir_all(dir.path().join("replays/invalid.folder")).unwrap();
         fs::create_dir_all(dir.path().join("replays/run-1/nested.json")).unwrap();
-        fs::write(dir.path().join("replays/run-1/game-2.json"), "{}").unwrap();
-        fs::write(dir.path().join("replays/run-1/game-1.json"), "{}").unwrap();
+        fs::write(dir.path().join("replays/run-1/game-2.json.gz"), "{}").unwrap();
+        let mut session = sequence_runner::MatchSession::<sequence_core::Simple>::new(
+            sequence_runner::MatchConfig {
+                max_actions: 1,
+                ..Default::default()
+            },
+            [
+                sequence_agent::AgentDescriptor::new("a", "A"),
+                sequence_agent::AgentDescriptor::new("b", "B"),
+            ],
+        )
+        .unwrap();
+        let mut actions = Vec::new();
+        session.game().legal_actions(&mut actions);
+        session.step(actions[0], std::time::Duration::ZERO).unwrap();
+        let record = session.finish().unwrap();
+        store.save_replay("run-1/game-1", &record).unwrap();
+        assert!(store.save_replay("run-1/game-1", &record).is_err());
         fs::write(dir.path().join("replays/run-1/invalid.game.json"), "{}").unwrap();
         fs::write(dir.path().join("replays/run-1/report.txt"), "{}").unwrap();
         fs::write(dir.path().join("replays/legacy.json"), "{}").unwrap();
@@ -230,7 +251,13 @@ mod tests {
             json!(["game-1", "game-2"])
         );
         assert_eq!(route(&store, "/api/replays/run-2").unwrap().2, b"[]");
-        assert_eq!(route(&store, "/api/replays/run-1/game-1").unwrap().0, 200);
+        let (status, _, bytes) = route(&store, "/api/replays/run-1/game-1").unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            serde_json::to_value(&record).unwrap()
+        );
+        assert!(route(&store, "/api/replays/run-1/game-2").is_err());
         assert_eq!(route(&store, "/api/replays/legacy").unwrap().0, 404);
         assert_eq!(route(&store, "/api/replays/run-1/missing").unwrap().0, 404);
         for id in [

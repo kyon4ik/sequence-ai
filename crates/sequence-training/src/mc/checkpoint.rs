@@ -10,7 +10,7 @@ use sequence_agent::mc::ValueNet;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-pub(super) const CHECKPOINT_VERSION: u32 = 3;
+pub(super) const CHECKPOINT_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct ResumeMetadata {

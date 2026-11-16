@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+import gzip
 import json
 import math
 from pathlib import Path
@@ -68,13 +69,17 @@ def load_comparisons(path):
         seeds = []
         for game in report["games"]:
             seat = game["players"].index(0)
-            replay_path = source.parent.parent.parent / "replays" / (game["replay"] + ".json")
-            if replay_path.exists():
-                replay = json.loads(replay_path.read_text())
-                seeds.append((replay["header"]["config"]["game_seed"],
-                              replay["header"]["config"]["agent_seeds"], seat))
-            else:
-                seeds.append(None)
+            config = game.get("config")
+            if config is None and game.get("replay"):
+                replay_path = source.parent.parent.parent / "replays" / (game["replay"] + ".json.gz")
+                if replay_path.exists():
+                    with gzip.open(replay_path, "rt") as replay_file:
+                        config = json.load(replay_file)["header"]["config"]
+                else:
+                    replay_path = replay_path.with_suffix("")
+                    if replay_path.exists():
+                        config = json.loads(replay_path.read_text())["header"]["config"]
+            seeds.append((config["game_seed"], config["agent_seeds"], seat) if config else None)
             completed = game["termination"].get("Completed")
             winner = completed.get("Won") if isinstance(completed, dict) else None
             wins.append(winner == ["Red", "Blue"][seat])
