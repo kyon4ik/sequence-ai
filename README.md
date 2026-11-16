@@ -3,7 +3,8 @@
 Train, evaluate, and inspect agents for two-player Sequence.
 
 The CLI supports Monte Carlo training on **Simple rules**, random and greedy
-baselines, head-to-head evaluation, round-robin tournaments, and a local replay
+baselines, head-to-head and checkpoint-panel evaluation, champion promotion,
+round-robin tournaments, and a local replay
 explorer. The Rust core also implements Classic rules. PPO and DQN are not
 implemented.
 
@@ -30,6 +31,9 @@ sequence serve --port 8080
 
 Open `http://127.0.0.1:8080` to inspect the model, evaluation results, and replays.
 The local explorer reads saved results; training runs through the CLI.
+
+Python is optional for offline analysis and plotting. All training, evaluation,
+and promotion commands run through `sequence`.
 
 Artifacts are saved under `data/` (ignored by Git). Each model ID is immutable;
 use `--id mc-v2` on a later training run. Use `--data-dir PATH` to choose another

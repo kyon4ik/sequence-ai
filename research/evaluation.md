@@ -2,12 +2,10 @@
 
 [Research protocols](README.md) · [Everyday evaluation](../docs/usage.md#evaluate-and-run-tournaments)
 
-For controlled panels without full replay storage, use the `evaluate` Rust
-example. Run from the repository root:
+For controlled panels without full replay storage, use `sequence panel`. Run from the repository root:
 
 ```sh
-cargo build --release -p sequence-training --features burn --example evaluate
-./target/release/examples/evaluate panel.json data/panel-evaluation
+sequence panel --config panel.json --output data/panel-evaluation
 ```
 
 Create `panel.json` with checkpoints that already exist locally:
@@ -26,15 +24,20 @@ Create `panel.json` with checkpoints that already exist locally:
 
 Each seed is a base for a shared game schedule; games use both seats. Results
 contain per-game scores and summaries and are saved as `<id>-<seed>.json`.
-Use `"device": "cpu"` for CPU evaluation. Existing output files are rejected.
+Use `"device": "cpu"` or pass `--device cpu` for CPU evaluation. Existing output
+files, duplicate checkpoint IDs, duplicate seeds, and empty panels are rejected.
+Checkpoint paths resolve from the working directory and are saved as absolute
+paths. Reports bind candidate and neural-opponent files with SHA-256 hashes,
+checked again before publication. These reports are inputs to
+[`sequence promote`](../docs/usage.md#champion-promotion).
 The Rust API also exposes `sequence_training::mc::evaluate_seeded_baselines`
 and `evaluate_seeded_panel`.
 
 ## Custom opponents and diagnostics
 
-The `sequence-training` example `evaluate` accepts an optional `opponents` list
+`sequence panel` accepts an optional `opponents` list
 of `[name, AgentConfig]` pairs. Defaults remain random and greedy. Frozen neural
-opponents use GPU batching on the selected device. All candidates share the same
+opponents use batched inference on the selected device. All candidates share the same
 seed schedule; each seed is evaluated in both seats. For example, add to the JSON
 manifest:
 

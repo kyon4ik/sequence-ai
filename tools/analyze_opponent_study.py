@@ -1,134 +1,21 @@
-"""Run and summarize a paired, fixed-update opponent-sampling study.
+"""Summarize saved opponent-sampling study artifacts without running models.
 
-python3 tools/opponent_study.py run --iterations 100 --seeds 42,43,44
-python3 tools/opponent_study.py summarize
-
-Uses the release sequence binary and sequence-training's evaluate example.
-Evaluations use batched inference and retain per-game scores instead of replays.
+python3 tools/analyze_opponent_study.py data/studies/opponent-sampling-20261113
 """
 from __future__ import annotations
-
 import argparse
 import csv
-import hashlib
-import json
+from datetime import datetime
+from pathlib import Path
 import random
 import statistics
-import struct
-import subprocess
-from datetime import datetime, timezone
-from pathlib import Path
+try:
+    from .analysis_common import read as read_json, write as write_json, parameter_payload_digest
+except ImportError:
+    from analysis_common import read as read_json, write as write_json, parameter_payload_digest
 
-REPO = Path(__file__).resolve().parents[1]
 WEIGHTS = {"self_play": 40, "best_checkpoint": 20, "previous_checkpoint": 15,
            "random_checkpoint": 15, "greedy": 10}
-
-
-def write_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    staging = path.with_suffix(path.suffix + ".tmp")
-    staging.write_text(json.dumps(value, indent=2) + "\n")
-    staging.replace(path)
-
-
-def read_json(path):
-    return json.loads(path.read_text())
-
-
-def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def parameter_payload_digest(path):
-    """Burnpack v1 payload for this fixed network layout, excluding random IDs.
-
-    burn-pack 0.22.1 uses a 10-byte header and a 256-byte-aligned data section.
-    Whole-file hashes also include per-process parameter IDs in CBOR metadata.
-    """
-    data = path.read_bytes()
-    magic, version, metadata_size = struct.unpack_from("<IHI", data)
-    if magic != 0x4255524E or version != 1:
-        raise ValueError("unsupported checkpoint format for parameter comparison")
-    offset = ((10 + metadata_size + 255) // 256) * 256
-    if offset >= len(data):
-        raise ValueError("checkpoint has no tensor payload")
-    return hashlib.sha256(data[offset:]).hexdigest()
-
-
-def prepare(args):
-    root = args.output.resolve()
-    seeds = [int(s) for s in args.seeds.split(",")]
-    if len(set(seeds)) != len(seeds) or not seeds:
-        raise ValueError("training seeds must be nonempty and distinct")
-    if args.games <= 0 or args.games % 2 or args.iterations <= 0 or args.updates <= 0:
-        raise ValueError("need positive iterations/updates and positive even evaluation games")
-    cases = []
-    for index, seed in enumerate(seeds):
-        arms = ["natural", "opponent_mix"] if index % 2 == 0 else ["opponent_mix", "natural"]
-        cases.extend({"id": f"{arm.replace('_', '-')}-s{seed}", "arm": arm, "seed": seed} for arm in arms)
-    plan = {"device": args.device, "iterations": args.iterations, "training_seeds": seeds,
-            "games_per_iteration": 128, "batch_size": 128, "updates_per_iteration": args.updates,
-            "evaluation_games_per_baseline": args.games, "heldout_seed": 2026111402,
-            "opponents": WEIGHTS, "cases": cases,
-            "primary": "mean final-checkpoint score against random and greedy, averaged equally across training seeds",
-            "secondary": ["final greedy score", "best-checkpoint mean score", "best greedy score", "best-to-final difference"],
-            "selection": "earliest highest periodic mean random/greedy score; no held-out selection",
-            "bootstrap": "paired resampling of game-seed pairs within a model; resampling training seeds for arm-mean differences"}
-    path = root / "plan.json"
-    if path.exists():
-        if read_json(path) != plan:
-            raise ValueError("study plan differs; use a new output directory")
-    else:
-        write_json(path, plan)
-        write_json(root / "provenance.json", {
-            "created_utc": datetime.now(timezone.utc).isoformat(),
-            "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
-            "binaries": {str(p.relative_to(REPO)): digest(p) for p in [REPO / "target/release/sequence", REPO / "target/release/examples/evaluate"]},
-        })
-    (root / "configs").mkdir(exist_ok=True)
-    for case in cases:
-        text = f'''algorithm = "mc"
-id = "{case['id']}"
-name = "Sampling study: {case['arm']}, seed {case['seed']}"
-device = "{args.device}"
-
-[training]
-iterations = {args.iterations}
-games_per_iteration = 128
-batch_size = 128
-inference_batch_games = 128
-learning_rate = 0.0003
-epsilon_start = 0.3
-epsilon_end = 0.05
-seed = {case['seed']}
-evaluation_interval = 10
-evaluation_games = 100
-sampling = "{case['arm']}"
-updates_per_iteration = {args.updates}
-
-[training.opponents]
-'''
-        text += "".join(f"{name} = {weight}\n" for name, weight in WEIGHTS.items())
-        path = root / "configs" / (case["id"] + ".toml")
-        if path.exists() and path.read_text() != text:
-            raise ValueError(f"configuration differs: {path}")
-        path.write_text(text)
-    return root, plan
-
-
-def existing_model(root, case):
-    models = root / "training/models"
-    candidates = [models / case["id"], *sorted(models.glob(case["id"] + "-resume-*"))]
-    for path in candidates:
-        if (path / "agent.json").exists():
-            return path, None
-    snapshots = [(path, snapshot) for path in candidates for snapshot in path.glob("checkpoints/iteration-*") if (snapshot / "state.json").is_file()]
-    resume = max(snapshots, key=lambda item: int(item[1].name.split("-")[-1]))[1] if snapshots else None
-    for retry in range(10000):
-        name = case["id"] if retry == 0 else f"{case['id']}-resume-{retry}"
-        if not (models / name).exists():
-            return models / name, resume
-    raise RuntimeError("too many interrupted model directories")
 
 
 def validate_model(path, plan, case):
@@ -147,54 +34,6 @@ def validate_model(path, plan, case):
                 count = sum(o["optimization_samples"] for o in row["opponents"] if o["source"] == source)
                 assert abs(count / budget - weight / 100) <= 1 / budget + 1e-12
     return rows
-
-
-def run_study(root, plan):
-    logs = root / "logs"
-    logs.mkdir(exist_ok=True)
-    resolved = {}
-    for case in plan["cases"]:
-        model, resume = existing_model(root, case)
-        if not (model / "agent.json").exists():
-            command = [str(REPO / "target/release/sequence"), "--data-dir", str(root / "training"),
-                       "train", "--config", str(root / "configs" / (case["id"] + ".toml")), "--id", model.name,
-                       "--device", plan["device"]]
-            if resume:
-                command.extend(["--resume", str(resume)])
-            print(f"Training {case['id']}: {plan['iterations']} iterations, {plan['updates_per_iteration']} updates each", flush=True)
-            write_json(root / "active.json", {"case": case, "model": str(model), "command": command,
-                                               "started_utc": datetime.now(timezone.utc).isoformat()})
-            with (logs / (model.name + ".log")).open("w") as log:
-                subprocess.run(command, cwd=REPO, stdout=log, stderr=subprocess.STDOUT, check=True)
-        rows = validate_model(model, plan, case)
-        resolved[case["id"]] = str(model)
-        write_json(root / "models.json", resolved)
-        print(f"Completed {case['id']}: {sum(r['updates'] for r in rows)} updates, {sum(r['samples'] for r in rows)} fresh samples", flush=True)
-    # Both arms must use identical preassigned episode seeds, even as their
-    # policies produce different trajectories and different numbers of samples.
-    for seed in plan["training_seeds"]:
-        pair = [read_json(Path(resolved[f"{arm}-s{seed}"]) / "report.json")["iterations"] for arm in ["natural", "opponent-mix"]]
-        assert [r["rollout_seed"] for r in pair[0]] == [r["rollout_seed"] for r in pair[1]]
-        assert all(r["rollout_seed"] is not None for r in pair[0])
-    checkpoints = []
-    for case in plan["cases"]:
-        model = Path(resolved[case["id"]])
-        for which, filename in [("best", "best.bpk"), ("final", "model.bpk")]:
-            identity = case["id"] + "-" + which
-            if not (root / "evaluations" / f"{identity}-{plan['heldout_seed']}.json").exists():
-                checkpoints.append({"id": identity, "path": str(model / filename)})
-    if checkpoints:
-        manifest = {"device": plan["device"], "games": plan["evaluation_games_per_baseline"], "inference_batch_games": 128,
-                    "seeds": [plan["heldout_seed"]], "checkpoints": checkpoints}
-        path = root / "study-evaluation.json"
-        write_json(path, manifest)
-        write_json(root / "study-checkpoint-hashes.json", {c["id"]: digest(Path(c["path"])) for c in checkpoints})
-        print("Evaluating all best and final checkpoints on the held-out schedule", flush=True)
-        with (logs / "evaluation.log").open("a") as log:
-            subprocess.run([str(REPO / "target/release/examples/evaluate"), str(path), str(root / "evaluations")],
-                           cwd=REPO, stdout=log, stderr=subprocess.STDOUT, check=True)
-    write_json(root / "active.json", {"phase": "complete", "completed_utc": datetime.now(timezone.utc).isoformat()})
-
 
 def baselines(report):
     return {b["summary"]["opponent"]: b for b in report["baselines"]}
@@ -345,25 +184,8 @@ def summarize(root, plan):
     (root / "summary.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines), flush=True)
 
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["run", "summarize"])
-    parser.add_argument("--output", type=Path, default=REPO / "data/studies/opponent-sampling-20261113")
-    parser.add_argument("--iterations", type=int, default=100)
-    parser.add_argument("--seeds", default="42,43,44")
-    parser.add_argument("--updates", type=int, default=64)
-    parser.add_argument("--games", type=int, default=1000)
-    parser.add_argument("--device", default="cuda:0")
-    args = parser.parse_args()
-    if args.action == "run":
-        root, plan = prepare(args)
-        run_study(root, plan)
-    else:
-        root = args.output.resolve()
-        plan = read_json(root / "plan.json")
-    summarize(root, plan)
-
-
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("root", type=Path)
+    args = parser.parse_args()
+    summarize(args.root, read_json(args.root / "plan.json"))

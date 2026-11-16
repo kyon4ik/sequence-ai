@@ -17,11 +17,14 @@ current 0.0001 default. See [research protocols](../research/README.md).
 ## Experiment file and paths
 
 Training reads TOML with `algorithm = "mc"`, a required `id`, an optional `name`,
-a `device` (default `"cpu"`), and an optional `[training]` table. Monte Carlo on
+a `device` (default `"cpu"`), `checkpoint_interval` (default 1), and an optional
+`[training]` table. Monte Carlo on
 Simple rules is the only implemented training algorithm; PPO and DQN names fail
 validation. Unknown fields and invalid hyperparameters are rejected.
 
-`--id` and `--device` override the experiment file. IDs contain 1–128 ASCII
+`--id`, `--device`, `--seed`, and `--checkpoint-interval` override the experiment
+file. The interval must be positive; full checkpoints are saved at that interval
+and at the final iteration. `progress.json` is updated every iteration. IDs contain 1–128 ASCII
 letters, digits, hyphens, or underscores and cannot overwrite existing models.
 The resolved experiment is saved as `experiment.json`.
 

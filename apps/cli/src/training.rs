@@ -5,11 +5,19 @@ use sequence_agent::InferenceDevice;
 
 use crate::artifacts::Store;
 
+pub struct Overrides {
+    pub id: Option<String>,
+    pub device: Option<InferenceDevice>,
+    pub seed: Option<u64>,
+    pub checkpoint_interval: Option<usize>,
+    pub resume: Option<std::path::PathBuf>,
+}
+
 #[cfg(feature = "burn")]
 mod enabled {
     use super::*;
     use crate::{
-        artifacts::{read_toml, write_json},
+        artifacts::{read_toml, replace_json, write_json},
         parse_device, validate_id,
     };
     use anyhow::{Context, anyhow};
@@ -35,26 +43,37 @@ mod enabled {
         device: String,
         #[serde(default)]
         training: TrainingConfig,
+        #[serde(default = "checkpoint_interval")]
+        checkpoint_interval: usize,
     }
 
     fn cpu() -> String {
         "cpu".into()
     }
 
-    pub fn run(
-        store: &Store,
-        path: &Path,
-        id: Option<String>,
-        device: Option<InferenceDevice>,
-        resume: Option<&Path>,
-    ) -> Result<()> {
+    fn checkpoint_interval() -> usize {
+        1
+    }
+
+    pub fn run(store: &Store, path: &Path, overrides: Overrides) -> Result<()> {
         let mut experiment: Experiment = read_toml(path)?;
-        if let Some(id) = id {
+        if let Some(id) = overrides.id {
             experiment.id = id;
         }
+        if let Some(seed) = overrides.seed {
+            experiment.training.seed = seed;
+        }
+        if let Some(interval) = overrides.checkpoint_interval {
+            experiment.checkpoint_interval = interval;
+        }
+        anyhow::ensure!(
+            experiment.checkpoint_interval > 0,
+            "checkpoint_interval must be positive"
+        );
         validate_id(&experiment.id)?;
         experiment.training.validate().map_err(|e| anyhow!("{e}"))?;
-        let device = device
+        let device = overrides
+            .device
             .map(Ok)
             .unwrap_or_else(|| parse_device(&experiment.device))
             .map_err(anyhow::Error::msg)?;
@@ -76,9 +95,12 @@ mod enabled {
         device.seed(experiment.training.seed);
         let checkpoints = dir.join("checkpoints");
         std::fs::create_dir(&checkpoints)?;
-        let output = train(ValueNet::new(&device), device, &experiment.training, resume, |checkpoint| {
+        let output = train(ValueNet::new(&device), device, &experiment.training, overrides.resume.as_deref(), |checkpoint| {
             let metrics = checkpoint.report().iterations.last().unwrap();
-            checkpoint.save(&checkpoints.join(format!("iteration-{:06}", metrics.iteration)))?;
+            if metrics.iteration.is_multiple_of(experiment.checkpoint_interval) || metrics.iteration == experiment.training.iterations {
+                checkpoint.save(&checkpoints.join(format!("iteration-{:06}", metrics.iteration)))?;
+            }
+            replace_json(&dir.join("progress.json"), metrics).map_err(|e| e.to_string())?;
             eprintln!("iteration {}/{}  mse={:.6}  epsilon={:.3}  samples={}  evaluation={:?}  rollout={:.2}s  optimize={:.2}s  eval={:.2}s  inference_batches={}  elapsed={:.2}s", metrics.iteration, experiment.training.iterations, metrics.mse, metrics.epsilon, metrics.samples, metrics.evaluation_score, metrics.rollout_time.as_secs_f64(), metrics.optimization_time.as_secs_f64(), metrics.evaluation_time.as_secs_f64(), metrics.rollout_inference.batches, metrics.elapsed.as_secs_f64());
             let mut counts = std::collections::BTreeMap::new();
             let mut fallbacks = 0;
@@ -107,7 +129,7 @@ mod enabled {
             .insert("seed".into(), experiment.training.seed.to_string());
         descriptor
             .metadata
-            .insert("device".into(), experiment.device);
+            .insert("device".into(), experiment.device.clone());
         // Publish the portable spec last: its checkpoint is relative to this file.
         write_json(
             &dir.join("agent.json"),
@@ -120,27 +142,28 @@ mod enabled {
         )?;
         println!("Saved agent {} to {}", experiment.id, dir.display());
         println!(
-            "Evaluate: sequence --data-dir {:?} eval {} greedy --games 100",
-            store.root, experiment.id
+            "Evaluate: sequence --data-dir {:?} eval {} greedy --games 100 --device {}",
+            store.root, experiment.id, experiment.device
         );
         Ok(())
     }
 }
 
-pub fn run(
-    store: &Store,
-    path: &Path,
-    id: Option<String>,
-    device: Option<InferenceDevice>,
-    resume: Option<&Path>,
-) -> Result<()> {
+pub fn run(store: &Store, path: &Path, overrides: Overrides) -> Result<()> {
     #[cfg(feature = "burn")]
     {
-        enabled::run(store, path, id, device, resume)
+        enabled::run(store, path, overrides)
     }
     #[cfg(not(feature = "burn"))]
     {
-        let _ = (store, path, id, device, resume);
+        let Overrides {
+            id,
+            device,
+            seed,
+            checkpoint_interval,
+            resume,
+        } = overrides;
+        let _ = (store, path, id, device, seed, checkpoint_interval, resume);
         anyhow::bail!(
             "training requires Burn support; build sequence-cli with its default features or --features burn"
         )

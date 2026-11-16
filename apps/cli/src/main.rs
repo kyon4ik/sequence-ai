@@ -9,6 +9,8 @@ use sequence_agent::InferenceDevice;
 mod analysis;
 mod artifacts;
 mod competition;
+mod panel;
+mod promotion;
 mod replay;
 mod training;
 mod web;
@@ -42,6 +44,12 @@ enum Command {
         /// Override the config's device: cpu or cuda:N.
         #[arg(long, value_parser = parse_device)]
         device: Option<InferenceDevice>,
+        /// Override the training seed.
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Save full state every N iterations, and always at the end.
+        #[arg(long, value_parser = positive_usize)]
+        checkpoint_interval: Option<usize>,
     },
     /// Play two saved agent IDs/spec paths or built-ins: random or greedy.
     Eval {
@@ -56,6 +64,17 @@ enum Command {
         #[arg(long, default_value = "cpu", value_parser = parse_device)]
         device: InferenceDevice,
     },
+    /// Evaluate checkpoint panels on shared, paired-seat seeds without replays.
+    Panel {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_parser = parse_device)]
+        device: Option<InferenceDevice>,
+    },
+    /// Promote a checkpoint only when bound, paired evaluations pass the gate.
+    Promote(promotion::Args),
     /// Run a round-robin league from TOML, with fresh Elo ratings for this run.
     Tournament {
         #[arg(long)]
@@ -120,7 +139,25 @@ fn run(cli: Cli) -> Result<()> {
             id,
             device,
             resume,
-        } => training::run(&store, &config, id, device, resume.as_deref()),
+            seed,
+            checkpoint_interval,
+        } => training::run(
+            &store,
+            &config,
+            training::Overrides {
+                id,
+                device,
+                seed,
+                checkpoint_interval,
+                resume,
+            },
+        ),
+        Command::Panel {
+            config,
+            output,
+            device,
+        } => panel::run(&config, &output, device),
+        Command::Promote(args) => promotion::run(&args),
         Command::Eval {
             agent_a,
             agent_b,

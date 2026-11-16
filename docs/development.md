@@ -16,8 +16,9 @@ has no direct Burn dependency. For a lightweight heuristic/replay-only executabl
 cargo run -p sequence-cli --no-default-features -- eval random greedy --games 10
 ```
 
-Python study drivers use Python 3. Plotting/analysis scripts with inline dependency
-metadata run through `uv run`, which installs their dependencies separately.
+Python is optional and only used for offline analysis and plotting. Scripts with
+inline dependency metadata run through `uv run`. Training, panel evaluation,
+and champion promotion run through `sequence`.
 Run commands from the repository root.
 
 ## Checks

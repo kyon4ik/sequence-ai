@@ -2,7 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["matplotlib>=3.9,<4"]
 # ///
-"""Export a standalone figure from tools/opponent_study.py's summary.json."""
+"""Export a standalone figure from analyze_opponent_study.py's summary.json."""
 import argparse
 import json
 import statistics

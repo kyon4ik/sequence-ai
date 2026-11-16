@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.opponent_study import bootstrap, paired_clusters, parameter_payload_digest
+from tools.analyze_opponent_study import bootstrap, paired_clusters
+from tools.analysis_common import parameter_payload_digest
 
 
 def report(scores):
@@ -48,6 +49,34 @@ class PairedStudyTests(unittest.TestCase):
                 changed["baselines"][0]["baseline"]["weights"][0] = 1
             with self.assertRaises(AssertionError):
                 paired_clusters(reference, changed, ["greedy"])
+
+class SavedEvaluationTests(unittest.TestCase):
+    def paired_report(self):
+        games = [
+            {"config": {"game_seed": seed, "agent_seeds": [1, 2] if seat == 0 else [2, 1], "max_actions": 1000},
+             "learner_seat": seat, "score": 0.5}
+            for seed in [7, 8] for seat in [0, 1]
+        ]
+        return {"config": {"games": 4}, "baselines": [
+            {"baseline": {"kind": "random"}, "summary": {"opponent": "random", "games": 4, "score": 0.5}, "games": games}
+        ]}
+
+    def test_saved_scores_keep_both_seats_in_each_block(self):
+        from tools.analysis_common import load_scores
+        keys, scores = load_scores(self.paired_report())
+        self.assertEqual([key[0] for key in keys], [7, 8])
+        self.assertEqual(scores["random"][1], [0.5, 0.5])
+
+    def test_unpaired_scores_and_incorrect_summaries_are_rejected(self):
+        from tools.analysis_common import load_scores
+        for mutation in ["seat", "summary"]:
+            data = self.paired_report()
+            if mutation == "seat":
+                data["baselines"][0]["games"][1]["config"]["agent_seeds"] = [1, 2]
+            else:
+                data["baselines"][0]["summary"]["score"] = 1.0
+            with self.assertRaises(ValueError):
+                load_scores(data)
 
 
 if __name__ == "__main__":

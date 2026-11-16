@@ -13,10 +13,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import PercentFormatter
-from learning_rate_confirmation import SEEDS,CHECKPOINTS,checkpoint
-from regression_ablation import read,write
-from opponent_study import parameter_payload_digest
-from checkpoint_gate import load_scores,promote
+from analysis_common import read, write, checkpoint, parameter_payload_digest, load_scores
 
 
 def interval(values):
@@ -36,7 +33,7 @@ def read_evaluation(path,names):
 
 def results(root,plan,arm,directory,seed):
     data=[];keys=None;opponents={}
-    for training_seed in SEEDS:
+    for training_seed in plan['seeds']:
         path=root/directory/f'lr-confirm-{arm}-s{training_seed}-i200-{seed}.json'
         k,score,matchups=read_evaluation(path,plan['release_primary'])
         if keys is None:keys=k
@@ -48,7 +45,7 @@ def results(root,plan,arm,directory,seed):
 
 def curve(root,plan,arm,iteration):
     arrays=[];keys=None
-    for seed in SEEDS:
+    for seed in plan['seeds']:
         path=root/'curves'/f'lr-confirm-{arm}-s{seed}-i{iteration}-{plan["curve_seed"]}.json'
         k,score,_=read_evaluation(path,plan['curve_primary'])
         if keys is None:keys=k
@@ -75,7 +72,7 @@ def analyze(root,phase):
     if phase=='lr':confirmed=confirmed and bool(min(per_seed)>-.05 and retention_difference.mean()>=0)
     decision=dict(confirmed=confirmed,candidate=arm,control=control,
         candidate_score=float(a.mean()),control_score=float(b.mean()),difference=float(delta.mean()),interval95=bounds,
-        per_seed={str(seed):float(v)for seed,v in zip(SEEDS,per_seed)},opponents=per_opponent,
+        per_seed={str(seed):float(v)for seed,v in zip(plan['seeds'],per_seed)},opponents=per_opponent,
         candidate_retention=float(retention_a.mean()),control_retention=float(retention_b.mean()),
         retention_difference=float(retention_difference.mean()),retention_difference_interval95=interval(retention_difference),
         rule=plan['confirmation_rule']if phase=='lr'else plan['replay_rule'],
@@ -83,15 +80,11 @@ def analyze(root,phase):
     decision_path=root/f'{phase}-decision.json'
     if decision_path.exists():assert read(decision_path)==decision,'Immutable analysis decision changed'
     else:write(decision_path,decision)
-    # Candidate seed 42 and final checkpoint 200 are preselected; no searching
-    # across trained seeds using held-out scores. A failed gate keeps the incumbent.
-    incumbent_spec=Path(plan['incumbent_spec']if phase=='lr'else read(root/'replay-incumbent.json')['agent_spec'])
-    gate=promote(root/directory/f'incumbent-{seed}.json',
-        root/directory/f'lr-confirm-{arm}-s42-i200-{seed}.json',
-        incumbent_spec,Path(models[f'lr-confirm-{arm}-s42'])/'agent.json',Path(plan['registry']),
-        root/f'promotion-{phase}.json',family_alpha=.025,eligible=confirmed)
+    # Promotion is performed explicitly by `sequence promote`; analysis only reads it.
+    gate_path = root / f'promotion-{phase}.json'
+    gate = read(gate_path) if gate_path.exists() else None
     initialization={}
-    for training_seed in SEEDS:
+    for training_seed in plan['seeds']:
         arms=['control','low_lr']+(['low_lr_replay']if phase=='replay'else[])
         hashes={}
         for candidate in arms:
@@ -115,11 +108,11 @@ def analyze(root,phase):
     fig,ax=plt.subplots(figsize=(10,5.5),layout='constrained')
     colors=['#64748b','#2563eb','#ea580c']
     for candidate,color in zip(available,colors):
-        values=[curve(root,plan,candidate,i)for i in CHECKPOINTS]
+        values=[curve(root,plan,candidate,i)for i in plan['checkpoints']]
         means=np.array([v.mean()for v in values]);ci=np.array([interval(v)for v in values])
-        ax.errorbar(CHECKPOINTS,means,yerr=[means-ci[:,0],ci[:,1]-means],label=candidate,marker='o',capsize=4,color=color)
+        ax.errorbar(plan['checkpoints'],means,yerr=[means-ci[:,0],ci[:,1]-means],label=candidate,marker='o',capsize=4,color=color)
     ax.axhline(.5,color='#94a3b8',linestyle='--');ax.set(xlabel='Checkpoint iteration',ylabel='Mean score against three fixed opponents',
-        ylim=(.3,.85),xticks=CHECKPOINTS,title='Full-budget training: 128 games per iteration, three independent seeds\nPointwise 95% intervals; final release results use a separate schedule and an additional opponent')
+        ylim=(.3,.85),xticks=plan['checkpoints'],title='Full-budget training: 128 games per iteration, three independent seeds\nPointwise 95% intervals; final release results use a separate schedule and an additional opponent')
     ax.yaxis.set_major_formatter(PercentFormatter(1));ax.grid(alpha=.15);ax.legend(frameon=False)
     for ext in ['png','svg']:fig.savefig(root/f'confirmation-curves.{ext}',dpi=180)
     lines=['# Full-budget learning-rate confirmation','',
@@ -133,7 +126,7 @@ def analyze(root,phase):
     for part in ['lr','replay']:
         path=root/f'{part}-decision.json'
         if not path.exists():continue
-        d=read(path);lo,hi=d['interval95'];g=read(root/f'promotion-{part}.json')
+        d=read(path);lo,hi=d['interval95'];promotion_path=root/f'promotion-{part}.json';g=read(promotion_path)if promotion_path.exists()else None
         lines+=[f'## {"Learning rate" if part=="lr"else"Replay combination"} result','',
             f"Confirmation rule passed: **{d['confirmed']}**. Candidate mean release score {d['candidate_score']:.2%}; control {d['control_score']:.2%}. "+
             f"Difference **{100*d['difference']:+.2f} percentage points**, paired 95% interval [{100*lo:+.2f}, {100*hi:+.2f}].",'',
@@ -142,9 +135,12 @@ def analyze(root,phase):
             '| Opponent | Candidate | Control | Difference |','|---|---:|---:|---:|']
         for name,result in d['opponents'].items():
             lines.append(f"| {name} | {result['candidate']:.2%} | {result['control']:.2%} | {100*result['difference']:+.2f} pp |")
-        lines+=['',f"Preselected seed-42 champion promotion gate passed: **{g['passed']}**. "+
-            f"Primary lower bound {100*g['primary_lower_bound']:+.2f} points; every opponent must have a lower bound above -5 points. "+
-            'Each of two possible gates uses family alpha 0.025, split across primary and opponent checks.','']
+        if g:
+            lines+=['',f"Preselected seed-42 champion promotion gate passed: **{g['passed']}**. "+
+                f"Primary lower bound {100*g['primary_lower_bound']:+.2f} points; every opponent must have a lower bound above -5 points. "+
+                'Each of two possible gates uses family alpha 0.025, split across primary and opponent checks.','']
+        else:
+            lines += ['', 'Champion promotion has not been run.', '']
     lines+=['## Limits and reproduction','',
         '- Three independent training seeds provide a stronger check than the earlier continuations, but still limit precision.',
         '- Equal interaction budgets; natural gradient sample counts vary with trajectory length. Replay replaces 25% of the existing selected slots, preserving each iteration\'s gradient budget.',
@@ -152,10 +148,9 @@ def analyze(root,phase):
         '- Frozen reference policies and their hashes are recorded before evaluations. Original artifacts are immutable.',
         '- A model agent.json publishes an immutable model identity. It does not make that model the champion. The champion is the separately gated data/champions/sequence.json pointer.',
         '- Plan, initialization/binary/reference hashes, manifests, logs, model paths, scores.csv, per-game evaluations and promotion evidence are retained alongside this report.','',
-        '`python tools/learning_rate_confirmation.py run`','',
         '`uv run tools/analyze_learning_rate_confirmation.py data/studies/learning-rate-confirmation --phase '+phase+'`']
     (root/'report.md').write_text('\n'.join(lines)+'\n')
-    print(json.dumps(decision,indent=2));print('Promotion passed:',gate['passed'])
+    print(json.dumps(decision,indent=2));print('Promotion passed:',gate['passed'] if gate else 'not run')
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('root',type=Path);parser.add_argument('--phase',choices=['lr','replay'],required=True)

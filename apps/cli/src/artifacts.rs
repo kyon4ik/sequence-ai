@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use sequence_agent::{AgentConfig, AgentDescriptor, AgentSpec};
 use serde::{Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 
 use crate::validate_id;
 
@@ -152,6 +153,30 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 pub fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+pub fn digest(path: &Path) -> Result<String> {
+    let mut file = File::open(path).with_context(|| format!("hashing {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Atomically replace a mutable pointer or progress report.
+pub fn replace_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(temporary.as_file_mut(), value)?;
+    temporary.write_all(b"\n")?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .with_context(|| format!("publishing {}", path.display()))?;
+    Ok(())
 }
 
 /// Never replace an existing experiment artifact, even when its ID was reused.

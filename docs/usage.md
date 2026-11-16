@@ -25,6 +25,9 @@ Evaluation defaults to CPU independently of the training device. CUDA failures
 do not silently switch to CPU. These runs need further evaluation before drawing
 conclusions about playing strength.
 
+Use `--seed 43 --id mc-seed-43` to repeat an experiment with another training
+seed. Seeds and effective execution settings are saved in `experiment.json`.
+
 Each model ID is immutable: choose a new `id` in the config or pass `--id mc-v2`
 for the next run. Training prints iteration progress (MSE, epsilon, sample counts,
 evaluation scores and timings), then saves the model and report. Configs reject
@@ -40,7 +43,8 @@ data/
 │   ├── model.bpk          # Neural checkpoint
 │   ├── agent.json         # Shared AgentSpec; published after successful training
 │   ├── experiment.json    # Resolved config, overrides and seed
-│   └── report.json        # Iteration losses, outcomes, rewards and timings
+│   ├── report.json        # Iteration losses, outcomes, rewards and timings
+│   └── progress.json      # Latest completed iteration, updated during training
 ├── replays/<run-id>/game-NNNNNN.json # Games grouped by evaluation/tournament run
 └── runs/<run-id>/
     ├── agents.json        # Input agent definitions
@@ -74,6 +78,55 @@ are counted as truncated, never as draws, and do not update Elo. Reports retain
 both aggregate decision timings and each match's metrics; full replay records
 also retain individual move times. Match elapsed time excludes model loading;
 run elapsed time includes it. Exact timings and GPU results are not reproducible.
+
+## Checkpoint panels
+
+Evaluate several checkpoints against the same opponents and seat-swapped game
+seeds without saving full replays:
+
+```sh
+sequence panel --config panel.json --output data/panel-evaluation
+```
+
+See [panel manifests and diagnostics](../research/evaluation.md) for the JSON
+format. Reports include checkpoint hashes so the champion gate can verify that
+its evidence belongs to the evaluated policies.
+
+## Champion promotion
+
+Training publishes a model version. To update a champion pointer, evaluate both
+the candidate and incumbent with `sequence panel` on the same fixed panel and
+seed schedule, then run:
+
+```sh
+sequence promote \
+  --incumbent data/panel-evaluation/incumbent-123.json \
+  --candidate data/panel-evaluation/candidate-123.json \
+  --incumbent-spec data/models/incumbent/agent.json \
+  --candidate-spec data/models/candidate/agent.json \
+  --registry data/champions/sequence.json \
+  --decision data/promotion/decision.json
+```
+
+Use at least 400 completed games per opponent with paired seats. The gate checks
+checkpoint hashes, opponent policies, game/policy seeds, seats, action limits,
+device, and evaluation configuration. It requires a positive lower bound on mean
+improvement across opponents and a lower bound above -0.05 against each opponent.
+Bounds use 5,000 paired seed-block bootstrap resamples with a fixed Rust RNG seed,
+and Bonferroni adjustment across the primary and per-opponent checks.
+`--family-alpha` defaults to 0.05.
+
+An optional `--confirmation analysis-decision.json` also requires its `confirmed`
+boolean to be true. The gate binds that file and both reports/specs by hash.
+Decisions are immutable: rerunning identical inputs reuses the decision; changed
+inputs or thresholds require a new decision path. A failed gate exits nonzero
+and preserves an existing champion file byte-for-byte. An absent registry is
+initialized with the explicitly evaluated incumbent. Successful promotion
+atomically updates the registry to a loadable AgentSpec:
+
+```sh
+sequence eval data/champions/sequence.json greedy --games 1000
+```
 
 ## Head-to-head tournament statistics
 
@@ -132,8 +185,9 @@ directly under `replays/` are ignored; move them into a folder to browse them.
 
 ## Training snapshots and evaluation
 
-The CLI atomically publishes a complete version-3 training checkpoint after every
-completed iteration:
+The CLI atomically publishes complete version-3 training checkpoints. By default
+it saves every iteration; set `--checkpoint-interval N` to save less often.
+The final iteration is always saved, and `progress.json` is updated every iteration:
 `models/<id>/checkpoints/iteration-NNNNNN/`. It contains `model.bpk`,
 `optimizer.bpk` (Adam moments and step counters), `state.json` (configuration,
 rollout/shuffle RNG state, iteration history and best score), and `best.bpk`

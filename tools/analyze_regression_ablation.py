@@ -18,7 +18,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import PercentFormatter
-from regression_ablation import ARMS, read
+from analysis_common import read
+ARMS = ['control', 'low_learning_rate', 'replay', 'historical_weight', 'fixed_exploration']
 from analyze_history_diagnosis import blocks
 
 SEEDS=[4201,4202,4203]
@@ -154,21 +155,11 @@ def analyze(root):
             '- Fixed exploration holds epsilon at the saved checkpoint-50 value; all other arms follow the original 200-iteration decay.',
             '- Every condition has the same interaction and optimization budgets and per-iteration game/policy seed schedule. Trajectories and opponent qualities can diverge after the intervention.',
             '- This study tests these parameter choices. No benefit does not rule out the broader mechanism.',
-            '- Existing checkpoints and normal resume rules are untouched. Research continuations preserve partial outputs but cannot resume them; the runner creates a new attempt on interruption.','',
-            '## Reproduction','',
-            '`cargo build --release -p sequence-training --features burn --example ablation --example evaluate`','',
-            '`python tools/regression_ablation.py run`','',
+            '- Archived continuation artifacts are inputs to this analysis. The historical continuation executor has been removed.','',
+            '## Analyze saved results','',
             '`uv run tools/analyze_regression_ablation.py data/studies/regression-ablation`','',
             'See plan.json, provenance.json, models.json, logs/, evaluations/, scores.csv and summary.json for exact inputs and results.']
     (root/'report.md').write_text('\n'.join(lines)+'\n')
-    for case in plan['cases']:
-        directory=Path(models[case['id']])
-        spec=dict(descriptor=dict(id=case['id'],name=case['id'],metadata=dict(
-            algorithm='mc',origin=case['origin'],intervention=case['arm'],continuation_seed=str(case['seed']))),
-            config=dict(kind='monte_carlo',checkpoint='model.bpk'))
-        path=directory/'agent.json'
-        if path.exists():assert read(path)==spec
-        else:path.write_text(json.dumps(spec,indent=2)+'\n')
     for row in summary:print(row)
     for row in comparisons:print(row)
 

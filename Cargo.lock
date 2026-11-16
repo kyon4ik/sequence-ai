@@ -5315,6 +5315,7 @@ dependencies = [
  "sequence-training",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tiny_http",
  "toml",

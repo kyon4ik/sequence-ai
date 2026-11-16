@@ -399,3 +399,275 @@ fn training_explains_missing_feature() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Burn support"));
 }
+
+fn digest(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
+}
+
+fn gate_fixture(root: &Path, name: &str, score: f64) -> (PathBuf, PathBuf) {
+    let model = root.join(format!("{name}.bpk"));
+    fs::write(&model, name).unwrap();
+    let spec = root.join(format!("{name}-agent.json"));
+    fs::write(&spec, serde_json::to_vec(&json!({"descriptor":{"id":name,"name":name,"metadata":{}},"config":{"kind":"monte_carlo","checkpoint":model.file_name().unwrap().to_str().unwrap()}})).unwrap()).unwrap();
+    let games: Vec<_> = (0..200).flat_map(|seed| [
+        json!({"config":{"game_seed":seed,"agent_seeds":[1,2],"max_actions":1000},"learner_seat":0,"score":score}),
+        json!({"config":{"game_seed":seed,"agent_seeds":[2,1],"max_actions":1000},"learner_seat":1,"score":score}),
+    ]).collect();
+    let report = root.join(format!("{name}-report.json"));
+    fs::write(&report,serde_json::to_vec(&json!({"checkpoint":model,"checkpoint_sha256":digest(&model),"device":"cpu",
+        "config":{"games":400,"seed":7,"inference_batch_games":128},"baselines":[{
+        "baseline":{"kind":"greedy","weights":[0,0,1,5,10,100]},"summary":{"opponent":"greedy","games":400,"score":score},"games":games}]})).unwrap()).unwrap();
+    (report, spec)
+}
+
+#[test]
+fn promotion_is_bound_idempotent_and_preserves_champion_on_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let (old, old_spec) = gate_fixture(root, "old", 0.);
+    let (better, better_spec) = gate_fixture(root, "better", 0.5);
+    let (worse, worse_spec) = gate_fixture(root, "worse", 0.);
+    let registry = root.join("champion.json");
+    let decision = root.join("promoted.json");
+    let run = |incumbent: &Path,
+               candidate: &Path,
+               incumbent_spec: &Path,
+               candidate_spec: &Path,
+               decision: &Path,
+               extra: &[&str]| {
+        let mut args = vec![
+            "promote",
+            "--incumbent",
+            incumbent.to_str().unwrap(),
+            "--candidate",
+            candidate.to_str().unwrap(),
+            "--incumbent-spec",
+            incumbent_spec.to_str().unwrap(),
+            "--candidate-spec",
+            candidate_spec.to_str().unwrap(),
+            "--registry",
+            registry.to_str().unwrap(),
+            "--decision",
+            decision.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        cli(root, &args)
+    };
+    success(run(&old, &better, &old_spec, &better_spec, &decision, &[]));
+    let bytes = fs::read(&registry).unwrap();
+    assert_eq!(
+        read(&registry)["config"]["checkpoint"],
+        root.join("better.bpk").to_str().unwrap()
+    );
+    assert_eq!(read(&registry)["descriptor"]["id"], "champion");
+    success(run(&old, &better, &old_spec, &better_spec, &decision, &[]));
+    assert_eq!(fs::read(&registry).unwrap(), bytes);
+    assert!(
+        !run(
+            &old,
+            &better,
+            &old_spec,
+            &better_spec,
+            &decision,
+            &["--family-alpha", "0.025"]
+        )
+        .status
+        .success()
+    );
+    let failed = root.join("failed.json");
+    assert!(
+        !run(&better, &worse, &better_spec, &worse_spec, &failed, &[])
+            .status
+            .success()
+    );
+    assert_eq!(read(&failed)["passed"], false);
+    assert_eq!(fs::read(&registry).unwrap(), bytes);
+    fs::write(root.join("worse.bpk"), "changed").unwrap();
+    assert!(
+        !run(
+            &better,
+            &worse,
+            &better_spec,
+            &worse_spec,
+            &root.join("changed.json"),
+            &[]
+        )
+        .status
+        .success()
+    );
+    assert!(!root.join("changed.json").exists());
+    assert_eq!(fs::read(&registry).unwrap(), bytes);
+    let confirmation = root.join("confirmation.json");
+    fs::write(&confirmation, r#"{"confirmed":false}"#).unwrap();
+    let blocked = root.join("blocked.json");
+    let (perfect, perfect_spec) = gate_fixture(root, "perfect", 1.);
+    assert!(
+        !run(
+            &better,
+            &perfect,
+            &better_spec,
+            &perfect_spec,
+            &blocked,
+            &["--confirmation", confirmation.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(read(&blocked)["aggregate_confirmation_passed"], false);
+    assert_eq!(fs::read(&registry).unwrap(), bytes);
+    let frozen = root.join("frozen.bpk");
+    fs::write(&frozen, "frozen opponent").unwrap();
+    for report in [&better, &perfect] {
+        let mut value = read(report);
+        value["baselines"][0]["baseline"] = json!({"kind":"monte_carlo","checkpoint":frozen});
+        fs::write(report, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+    let bound = root.join("bound.json");
+    assert!(
+        !run(&better, &perfect, &better_spec, &perfect_spec, &bound, &[])
+            .status
+            .success()
+    );
+    assert!(!bound.exists());
+    assert_eq!(fs::read(&registry).unwrap(), bytes);
+    for report in [&better, &perfect] {
+        let mut value = read(report);
+        value["opponent_checkpoint_sha256"] = json!({"greedy":digest(&frozen)});
+        fs::write(report, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+    success(run(
+        &better,
+        &perfect,
+        &better_spec,
+        &perfect_spec,
+        &bound,
+        &[],
+    ));
+    let promoted = fs::read(&registry).unwrap();
+    fs::write(&frozen, "changed opponent").unwrap();
+    assert!(
+        !run(&better, &perfect, &better_spec, &perfect_spec, &bound, &[])
+            .status
+            .success()
+    );
+    assert_eq!(fs::read(&registry).unwrap(), promoted);
+}
+
+#[cfg(feature = "burn")]
+#[test]
+fn training_intervals_and_panel_publish_bound_paired_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let data = root.join("data");
+    let config = root.join("train.toml");
+    fs::write(&config,"algorithm = 'mc'\nid = 'panel-model'\n[training]\niterations = 3\ngames_per_iteration = 1\nevaluation_games = 2\nepsilon_start = 1.0\nepsilon_end = 1.0\n").unwrap();
+    success(cli(
+        &data,
+        &[
+            "train",
+            "--config",
+            config.to_str().unwrap(),
+            "--seed",
+            "91",
+            "--checkpoint-interval",
+            "2",
+        ],
+    ));
+    let model = data.join("models/panel-model");
+    assert!(!model.join("checkpoints/iteration-000001").exists());
+    assert!(
+        model
+            .join("checkpoints/iteration-000002/state.json")
+            .is_file()
+    );
+    assert!(
+        model
+            .join("checkpoints/iteration-000003/state.json")
+            .is_file()
+    );
+    assert_eq!(read(model.join("experiment.json"))["training"]["seed"], 91);
+    assert_eq!(read(model.join("progress.json"))["iteration"], 3);
+    let manifest = root.join("panel.json");
+    let output = root.join("evaluations");
+    let panel = json!({"device":"cuda:0","games":4,"inference_batch_games":2,"seeds":[77],"checkpoints":[
+        {"id":"final","path":model.join("model.bpk")},{"id":"best","path":model.join("best.bpk")}],
+        "opponents":[["greedy",{"kind":"greedy","weights":[0,0,1,5,10,100]}],["frozen",{"kind":"monte_carlo","checkpoint":model.join("best.bpk")}]],"diagnostic_games":2});
+    fs::write(&manifest, serde_json::to_vec(&panel).unwrap()).unwrap();
+    success(cli(
+        &data,
+        &[
+            "panel",
+            "--config",
+            manifest.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--device",
+            "cpu",
+        ],
+    ));
+    let final_path = output.join("final-77.json");
+    let bytes = fs::read(&final_path).unwrap();
+    let final_report = read(&final_path);
+    let best_report = read(output.join("best-77.json"));
+    assert_eq!(final_report["device"], "cpu");
+    assert_eq!(
+        final_report["checkpoint_sha256"],
+        digest(&model.join("model.bpk"))
+    );
+    assert_eq!(
+        final_report["opponent_checkpoint_sha256"]["frozen"],
+        digest(&model.join("best.bpk"))
+    );
+    let keys = |r: &Value| {
+        r["baselines"][0]["games"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| (g["config"].clone(), g["learner_seat"].clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(&final_report), keys(&best_report));
+    assert_eq!(
+        final_report["baselines"][0]["games"][0]["config"]["game_seed"],
+        final_report["baselines"][0]["games"][1]["config"]["game_seed"]
+    );
+    assert!(
+        !cli(
+            &data,
+            &[
+                "panel",
+                "--config",
+                manifest.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--device",
+                "cpu"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(fs::read(&final_path).unwrap(), bytes);
+    let mut invalid = panel;
+    invalid["seeds"] = json!([77, 77]);
+    fs::write(&manifest, serde_json::to_vec(&invalid).unwrap()).unwrap();
+    let absent = root.join("invalid");
+    assert!(
+        !cli(
+            &data,
+            &[
+                "panel",
+                "--config",
+                manifest.to_str().unwrap(),
+                "--output",
+                absent.to_str().unwrap(),
+                "--device",
+                "cpu"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(!absent.exists());
+}
