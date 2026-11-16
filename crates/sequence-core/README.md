@@ -1,5 +1,7 @@
 # sequence-core
 
+[Project overview](../../README.md) · [Architecture and Rust APIs](../../docs/architecture.md)
+
 Two-player Sequence with seven-card hands and a fixed 10 × 10 board.
 
 ## Game variants

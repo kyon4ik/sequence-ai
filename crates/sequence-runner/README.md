@@ -1,5 +1,7 @@
 # sequence-runner
 
+[Project overview](../../README.md) · [Architecture and Rust APIs](../../docs/architecture.md)
+
 Executes one two-player match. Tournament scheduling, Elo, storage, training,
 and UI code belong to their own crates.
 
