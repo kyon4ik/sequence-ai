@@ -63,7 +63,9 @@ parameters. CLI training enables Burn by default. `--device cpu` and
 not silently switch to CPU. Use a release build for longer experiments:
 `cargo run --release -p sequence-cli -- train --config configs/experiments/mc.toml`.
 An initial small training run verifies the workflow; playing strength requires
-more training and evaluation.
+more training and evaluation. For the confirmed full-budget configuration, use
+`configs/experiments/mc-stable.toml` (200 iterations, 128 games per iteration,
+learning rate 0.0001, uniform historical opponents, replay off).
 
 Each model ID is immutable: choose a new `id` in the config or pass `--id mc-v2`
 for the next run. Training prints iteration progress (MSE, epsilon, sample counts,
@@ -362,8 +364,12 @@ sequence train --config configs/experiments/mc.toml --id mc-resumed \
   --resume data/models/mc-v1/checkpoints/iteration-000005
 ```
 
-The iteration count remains the original total, preserving the exploration
-schedule. Learning configuration changes are rejected. The execution setting
+By default, exploration decays over the original total iteration count. To
+extend a completed 200-iteration run, set `iterations = 1000` and
+`epsilon_decay_iterations = 200` in the new config, then resume from its full
+iteration-200 checkpoint into a new ID. Exploration stays at its final value
+after iteration 200. Resume requires an unchanged effective decay horizon and
+rejects other learning changes or a reduced iteration budget. The execution setting
 `training.inference_batch_games` may change on resume; old checkpoints and
 configs that omit it use the default of 16. The current network has no
 stochastic tensor layers; episode RNGs are recreated from seeds emitted by the
@@ -465,6 +471,49 @@ replays, and times evaluation against both baselines. Set
 `SEQUENCE_BENCH_BATCH_GAMES=32,64,128` to restrict the sweep. Its output is JSON
 with throughput and inference timing breakdowns.
 
+### Adaptive historical opponents
+
+`configs/experiments/mc-history-uniform.toml` and
+`configs/experiments/mc-history-adaptive.toml` provide matched 80% self-play,
+20% historical-opponent experiments. Compare both with `mc-mixed.toml`.
+Use distinct model IDs and several training seeds for each condition.
+
+```sh
+cargo run --release -p sequence-cli -- train --config configs/experiments/mc-history-adaptive.toml
+```
+
+The optional `[training.historical_sampling]` table controls the
+`random_checkpoint` category only:
+
+- `adaptive = false` defaults to uniform sampling, preserving existing behavior.
+- `snapshot_interval = 1` defaults to every historical checkpoint. The experiment
+  configs use 10; iteration 0 is eligible, and the current checkpoint is excluded.
+- `learning_rate = 0.01` controls quality decreases after learner wins.
+- `uniform_fraction = 0.0` optionally mixes uniform exploration into softmax.
+
+Adapted from [OpenAI Five, Appendix N](https://cdn.openai.com/dota-2.pdf),
+new eligible opponents receive the maximum existing quality. Adaptive sampling
+uses softmax quality probabilities; learner wins decrease quality by
+`learning_rate / (eligible_count * sampling_probability)`. Losses and draws
+leave it unchanged. With uniform mixing enabled, the denominator uses the actual
+mixed probability. This trainer schedules games together: probabilities are
+frozen for an iteration and updates affect the next iteration. Consequently this
+is a batched adaptation, not an exact reproduction of Five's online scheduler.
+
+Quality values and scheduler RNG are saved in checkpoint state. Sampling settings
+must match when resuming. Reports include `historical_distribution` (checkpoint,
+quality and probability before rollout), alongside per-opponent outcomes. The
+snapshot interval controls sampling eligibility, not archive storage: all weights
+remain archived for best/previous opponents and existing resume compatibility.
+
+Compare equal interaction budgets, report optimization sample counts and elapsed
+time, and evaluate selected checkpoints on a separate fixed opponent panel with
+paired seeds and both seats. Adaptive training win rate is not a stable strength
+metric. These configs do not establish that adaptive sampling improves Sequence;
+that requires multi-seed held-out evaluation. Existing training-time best selection
+still uses random/greedy baselines. Counter-strategy training and tactical curricula
+are not enabled by these settings.
+
 ### Plot training metrics
 
 Generate a standalone interactive dashboard, PNG, SVG, CSV and summary JSON:
@@ -497,3 +546,144 @@ Report paths are relative to the working directory. The dashboard shows win-rate
 bars with 95% Wilson intervals (draws count as non-wins). When replay files are
 available, it also validates paired game/agent seeds, seats, opponent settings
 and device before exporting exact paired win-test results in the summary JSON.
+
+### Investigating checkpoint strength
+
+The `sequence-training` example `evaluate` accepts an optional `opponents` list
+of `[name, AgentConfig]` pairs. Defaults remain random and greedy. Frozen neural
+opponents use GPU batching on the selected device. All candidates share the same
+seed schedule; each seed is evaluated in both seats. For example, add to the JSON
+manifest:
+
+```json
+{
+  "opponents": [
+    ["greedy", {"kind": "greedy", "weights": [0, 0, 1, 5, 10, 100]}],
+    ["reference", {"kind": "monte_carlo", "checkpoint": "data/models/reference/model.bpk"}]
+  ],
+  "diagnostic_games": 200
+}
+```
+
+Paths resolve from the working directory. Optional diagnostics inspect the first
+N games per opponent, count legal immediate wins taken/missed, retain reproducible
+miss examples, and summarize chosen value predictions versus actual outcomes.
+These are matchup-specific descriptions; correlated decisions within games are
+not independent calibration trials. Diagnostics never expose hidden opponent
+hands to the policy. Simple rules have no jacks or exchanges.
+
+`tools/analyze_history_diagnosis.py STUDY_DIRECTORY` reads `baselines/`, `panel/`,
+and `diagnostics/` evaluation outputs, exports CSV/JSON, and plots scores and value
+reliability. Its paired comparisons verify identical seeds and keep both seats
+together in each bootstrap block. Pointwise intervals reflect game-seed uncertainty
+for these checkpoints, not independent-training-seed uncertainty or a guarantee
+against multiple-comparison error.
+
+### Controlled regression interventions
+
+`tools/regression_ablation.py` prepares and runs matched research continuations
+from the seed-42 uniform/adaptive checkpoint-50 archives. Build the examples,
+then run the driver from the repository root with host GPU access:
+
+```sh
+cargo build --release -p sequence-training --features burn --example ablation --example evaluate
+python tools/regression_ablation.py run
+uv run tools/analyze_regression_ablation.py data/studies/regression-ablation
+```
+
+The prespecified screening plan uses three continuation seeds, five conditions,
+50 additional iterations, 64 games and 27 batches of 128 samples per iteration.
+Conditions are control, 3x lower learning rate, 25% retained samples from a bounded
+50,000-sample FIFO, 20% historical gradient samples, and exploration fixed at the
+checkpoint-50 value. Replay starts empty and retains previous continuation
+iterations with their original Monte Carlo labels; this tests coverage and
+stale/off-policy targets together. The architecture and checkpoint weights are
+identical at each matched start; Adam state and historical policies are restored.
+
+This experimental path is separate from normal resume and never changes source
+artifacts. Partial research runs are preserved but cannot resume; rerunning the
+driver uses a new attempt directory. Normal training resume still rejects
+learning changes. The default study output is `data/studies/regression-ablation`.
+It contains the immutable plan, configuration/source hashes, logs, models,
+per-game evaluation results, summary CSV/JSON, report and plot. Each final model
+plays 400 games per reference on a shared seat-swapped seed schedule. Primary
+results equally average greedy and the two frozen checkpoint-50 references;
+random is secondary. These continuation replicates are conditional on two
+starting policies from one initial training seed, not independent training runs.
+
+### Full-budget learning-rate confirmation and champion selection
+
+Run the prespecified study with host GPU access:
+
+```sh
+cargo build --release -p sequence-training --features burn --example train_study --example evaluate
+python tools/learning_rate_confirmation.py run
+```
+
+Six fresh runs compare learning rates 0.0003 and 0.0001 with seeds 42–44,
+128 games per iteration, 200 iterations, uniform historical sampling, and the
+original exploration schedule. Checkpoints 50/100/150/200 share a curve evaluation
+schedule. The final release comparison uses a separate schedule plus an additional
+frozen mixed-training opponent. Each matchup uses 1,000 games, both seats, and
+paired seeds. The plan and input/reference/binary hashes are saved before results.
+
+If the prespecified learning-rate confirmation rule passes, the workflow runs
+three further fresh 200-iteration low-rate agents with retained samples. That
+comparison uses another release schedule. All results, logs, immutable model
+versions, full checkpoints and decisions live under
+`data/studies/learning-rate-confirmation/`. Interrupted runs resume from the latest
+50-iteration snapshot into a new attempt directory.
+
+Retained samples are an opt-in training setting:
+
+```toml
+[training.replay]
+capacity = 50000
+fraction = 0.25
+```
+
+The buffer starts empty. Later iterations replace the requested fraction of their
+existing optimization slots with samples from previous iterations. Original Monte
+Carlo outcomes are retained, so labels become off-policy. Total gradient samples
+and batches per iteration remain unchanged; per-opponent optimization counts plus
+`replay_samples` equal `optimization_samples`. Reports also include `replay_size`.
+Complete replay-enabled snapshots include `replay.bin`; missing or malformed replay
+state fails resumption rather than silently resetting the buffer. Normal resume
+continues to require the same replay and other learning settings.
+
+Training publishes a versioned `agent.json` for inspection, not a champion update.
+`tools/checkpoint_gate.py` controls the separate champion pointer. It checks bound
+checkpoint hashes, identical opponent policies, matching game/policy seeds and
+seats, a positive lower bound on overall improvement, and per-opponent lower bounds
+above a five-percentage-point regression margin. The study preselects seed 42 and
+the final checkpoint; it does not search for a successful seed on release results.
+A failed gate preserves an existing champion file byte-for-byte. The two possible
+study gates each use family alpha 0.025, split across the primary and opponent
+checks. An absent registry is initialized with the explicit incumbent.
+
+The resulting champion pointer is a normal loadable AgentSpec with audit metadata:
+
+```sh
+sequence eval data/champions/sequence.json greedy --games 1000 --device cuda:0
+```
+
+The completed confirmation established a release-panel gain of 16.95 percentage
+points for learning rate 0.0001 over 0.0003 (paired 95% interval +13.59 to +20.15).
+The training default and introductory config now use 0.0001. Use
+`configs/experiments/mc-stable.toml` for the full-budget settings. The original
+mixed/history comparison configs retain their explicit 0.0003 rate to reproduce
+those experiments; they override the new default.
+
+Combining the lower rate with 25% retained samples showed no additional gain:
+-0.27 points (95% interval -1.80 to +1.40) on its separate release schedule.
+Replay remains opt-in and its candidate was not promoted. The champion pointer
+retains the preselected low-rate seed-42 model, which passed the release gate.
+Three training seeds still limit population-level inference. Mean late-training
+retention improved, but its interval includes zero; endpoint strength is the
+stronger finding. Natural optimization counts can vary with game length despite
+equal interaction budgets.
+
+Saved results: `data/studies/learning-rate-confirmation/report.md`,
+`confirmation-curves.png`, `scores.csv`, and the two `*-decision.json` /
+`promotion-*.json` pairs. Training and release decisions are separate: creating a
+new model version does not replace `data/champions/sequence.json`.

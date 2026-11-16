@@ -34,6 +34,8 @@ pub struct BaselineEvaluation {
     pub games: Vec<EvaluationGame>,
     pub inference: McInferenceMetrics,
     pub elapsed: Duration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<super::diagnostics::PolicyDiagnostics>,
 }
 
 /// Batched, zero-exploration evaluation on an explicit seed schedule independent
@@ -44,6 +46,27 @@ pub fn evaluate_seeded_baselines(
     device: &Device,
     config: &EvaluationConfig,
 ) -> Result<Vec<BaselineEvaluation>, AgentError> {
+    evaluate_seeded_panel(
+        net,
+        device,
+        config,
+        &[
+            ("random".into(), AgentConfig::Random),
+            ("greedy".into(), AgentConfig::greedy()),
+        ],
+        0,
+    )
+}
+
+/// Evaluate a fixed panel on a common, seat-swapped seed schedule. Optional
+/// diagnostics inspect the first `diagnostic_games` games against each opponent.
+pub fn evaluate_seeded_panel(
+    net: &ValueNet,
+    device: &Device,
+    config: &EvaluationConfig,
+    opponents: &[(String, AgentConfig)],
+    diagnostic_games: usize,
+) -> Result<Vec<BaselineEvaluation>, AgentError> {
     if config.games == 0 || !config.games.is_multiple_of(2) || config.inference_batch_games == 0 {
         return Err(
             "evaluation needs positive even games and positive inference_batch_games".into(),
@@ -51,10 +74,7 @@ pub fn evaluate_seeded_baselines(
     }
     let configs = seeded_configs(config);
     let mut results = Vec::new();
-    for (name, baseline) in [
-        ("random", AgentConfig::Random),
-        ("greedy", AgentConfig::greedy()),
-    ] {
+    for (name, baseline) in opponents {
         let started = Instant::now();
         let output = rollout::play(
             net,
@@ -62,9 +82,9 @@ pub fn evaluate_seeded_baselines(
             &configs,
             config.inference_batch_games,
             0.,
-            Some(&baseline),
+            Some(baseline),
         )?;
-        let summary = evaluation_summary(name.into(), &output.records)?;
+        let summary = evaluation_summary(name.clone(), &output.records)?;
         let games = output
             .records
             .iter()
@@ -80,8 +100,18 @@ pub fn evaluate_seeded_baselines(
                 }
             })
             .collect();
+        let diagnostics = if diagnostic_games > 0 {
+            Some(super::diagnostics::inspect(
+                net,
+                device,
+                &output.records[..diagnostic_games.min(output.records.len())],
+            )?)
+        } else {
+            None
+        };
         results.push(BaselineEvaluation {
-            baseline,
+            baseline: baseline.clone(),
+            diagnostics,
             summary,
             games,
             inference: output.inference,
@@ -115,6 +145,99 @@ fn seeded_configs(config: &EvaluationConfig) -> Vec<MatchConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frozen_panel_matches_scalar_and_diagnostics_replay() {
+        use sequence_agent::{AgentDescriptor, AgentSpec, InferenceDevice};
+        use sequence_core::{Game, GameOutcome, Simple};
+        use sequence_runner::MatchRunner;
+        let device = Device::flex();
+        device.seed(921);
+        let net = ValueNet::new(&device);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frozen.bpk");
+        net.clone().save_file(&path).unwrap();
+        let opponent = AgentConfig::MonteCarlo { checkpoint: path };
+        let config = EvaluationConfig {
+            games: 6,
+            inference_batch_games: 3,
+            seed: 12391,
+        };
+        let results = evaluate_seeded_panel(
+            &net,
+            &device,
+            &config,
+            &[("frozen".into(), opponent.clone())],
+            6,
+        )
+        .unwrap();
+        let result = &results[0];
+        let spec = AgentSpec {
+            descriptor: AgentDescriptor::new("frozen", "Frozen"),
+            config: opponent,
+        };
+        let mut runner = MatchRunner::<Simple>::default();
+        for entry in &result.games {
+            let record = runner
+                .run_factories(
+                    entry.config.clone(),
+                    [
+                        &spec.on_device(InferenceDevice::Cpu),
+                        &spec.on_device(InferenceDevice::Cpu),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(
+                entry.score,
+                [1., 0., 0.5]
+                    [outcome_index(record.termination.outcome().unwrap(), entry.learner_seat)]
+            );
+        }
+        let diag = result.diagnostics.as_ref().unwrap();
+        assert_eq!(diag.games, 6);
+        assert_eq!(
+            diag.decisions,
+            diag.value_bins.iter().map(|b| b.decisions).sum::<usize>()
+        );
+        assert_eq!(
+            diag.decisions,
+            diag.phase_bins.iter().map(|b| b.decisions).sum::<usize>()
+        );
+        assert!(diag.immediate_wins_taken <= diag.immediate_win_opportunities);
+        for miss in &diag.missed_wins {
+            let entry = result
+                .games
+                .iter()
+                .find(|g| {
+                    g.config.game_seed == miss.game_seed && g.learner_seat == miss.learner_seat
+                })
+                .unwrap();
+            let record = runner
+                .run_factories(
+                    entry.config.clone(),
+                    [
+                        &spec.on_device(InferenceDevice::Cpu),
+                        &spec.on_device(InferenceDevice::Cpu),
+                    ],
+                )
+                .unwrap();
+            let mut game = Simple::from_seed(miss.game_seed);
+            for step in &record.steps {
+                if game.turns() == miss.turn {
+                    break;
+                }
+                game.apply(step.action).unwrap();
+            }
+            let actor = game.current_player();
+            assert_eq!(actor as usize, miss.learner_seat);
+            let mut winning = game.clone();
+            winning.apply(miss.winning).unwrap();
+            assert_eq!(winning.outcome(), GameOutcome::Won(actor));
+            game.apply(miss.chosen).unwrap();
+            assert_ne!(game.outcome(), GameOutcome::Won(actor));
+            assert!(miss.chosen_value >= miss.winning_value - 1e-4);
+        }
+    }
 
     #[test]
     fn explicit_evaluation_seeds_are_paired_and_reproducible() {

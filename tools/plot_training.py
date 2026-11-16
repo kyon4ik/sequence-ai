@@ -180,9 +180,11 @@ def build_panels(metrics, comparisons):
         ])
     if any(m.get("optimization_samples") for m in metrics):
         panels.extend([
-            {"title": "Samples used for updates by requested opponent category", "ylabel": "Optimization samples", "series": [
+            {"title": "Samples used for updates", "ylabel": "Optimization samples", "series": [
                 line(source.replace("_", " "), x, [sum(e.get("optimization_samples", 0) for e in grouped(m, source)) if m.get("optimization_samples") else None for m in metrics], color)
-                for source, color in zip(sources, colors)]},
+                for source, color in zip(sources, colors)] + ([
+                    line("Retained samples", x, [m.get("replay_samples", 0) for m in metrics], "#9333ea")
+                ] if any(m.get("replay_samples", 0) for m in metrics) else [])},
             {"title": "Gradient update budget", "ylabel": "Updates", "series": [
                 line("Updates per iteration", x, [m.get("updates") or None for m in metrics], COLORS[0])]},
         ])

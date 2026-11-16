@@ -102,20 +102,36 @@ pub(super) fn play(
     epsilon: f64,
     baseline: Option<&AgentConfig>,
 ) -> Result<Rollout, AgentError> {
+    // Frozen neural opponents share GPU batching rather than creating a CPU
+    // policy for every game. Both seats use zero exploration in evaluation.
+    let frozen = match baseline {
+        Some(AgentConfig::MonteCarlo { checkpoint }) => {
+            Some(net.clone().valid().try_load_file(checkpoint)?)
+        }
+        _ => None,
+    };
     let assignments: Vec<_> = (0..configs.len())
         .map(|index| {
             let mut seats = [SeatPolicy::Neural(0); 2];
             let mut descriptors = std::array::from_fn(|_| AgentDescriptor::new("self-play", "MC"));
             if baseline.is_some() {
-                seats[1 - index % 2] = SeatPolicy::Baseline;
+                seats[1 - index % 2] = if frozen.is_some() {
+                    SeatPolicy::Neural(1)
+                } else {
+                    SeatPolicy::Baseline
+                };
                 descriptors[index % 2] = AgentDescriptor::new("candidate", "Candidate");
                 descriptors[1 - index % 2] = AgentDescriptor::new("baseline", "Baseline");
             }
             Assignment { seats, descriptors }
         })
         .collect();
+    let mut models = vec![net.clone()];
+    if let Some(frozen) = frozen {
+        models.push(frozen);
+    }
     play_assigned(
-        std::slice::from_ref(net),
+        &models,
         device,
         configs,
         batch_games,

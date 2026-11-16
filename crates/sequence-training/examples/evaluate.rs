@@ -1,12 +1,13 @@
-//! Batched baseline evaluations: evaluate <manifest.json> <output-directory>.
+//! Batched fixed-panel evaluations: evaluate <manifest.json> <output-directory>.
 //! Manifest: {"device":"cuda:0", "games":1000, "inference_batch_games":128,
 //! "seeds":[2026111401], "checkpoints":[{"id":"best", "path":".../best.bpk"}]}.
+//! Optional opponents: [["name", AgentConfig], ...]; diagnostic_games defaults to 0.
 
 #[cfg(feature = "burn")]
 fn main() -> Result<(), sequence_agent::AgentError> {
     use burn::prelude::*;
-    use sequence_agent::mc::ValueNet;
-    use sequence_training::mc::{EvaluationConfig, evaluate_seeded_baselines};
+    use sequence_agent::{AgentConfig, mc::ValueNet};
+    use sequence_training::mc::{EvaluationConfig, evaluate_seeded_panel};
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
 
@@ -24,6 +25,16 @@ fn main() -> Result<(), sequence_agent::AgentError> {
         inference_batch_games: usize,
         seeds: Vec<u64>,
         checkpoints: Vec<Checkpoint>,
+        #[serde(default = "default_opponents")]
+        opponents: Vec<(String, AgentConfig)>,
+        #[serde(default)]
+        diagnostic_games: usize,
+    }
+    fn default_opponents() -> Vec<(String, AgentConfig)> {
+        vec![
+            ("random".into(), AgentConfig::Random),
+            ("greedy".into(), AgentConfig::greedy()),
+        ]
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() != 2 {
@@ -63,7 +74,13 @@ fn main() -> Result<(), sequence_agent::AgentError> {
                 "Evaluating {} on {}: {} games per baseline, seed {}",
                 checkpoint.id, manifest.device, manifest.games, seed
             );
-            let baselines = evaluate_seeded_baselines(&net, &device, &config)?;
+            let baselines = evaluate_seeded_panel(
+                &net,
+                &device,
+                &config,
+                &manifest.opponents,
+                manifest.diagnostic_games,
+            )?;
             let report = serde_json::json!({"id": checkpoint.id, "checkpoint": checkpoint.path, "device": manifest.device, "config": config, "baselines": baselines});
             std::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
             for baseline in &baselines {

@@ -31,7 +31,7 @@ struct Cli {
 enum Command {
     /// Train and save a neural agent from a TOML experiment (currently MC self-play).
     Train {
-        /// Resume a full checkpoint into a new agent ID, retaining the original config.
+        /// Resume into a new ID, preserving learning settings and exploration decay.
         #[arg(long)]
         resume: Option<PathBuf>,
         #[arg(long)]

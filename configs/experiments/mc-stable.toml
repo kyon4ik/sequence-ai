@@ -1,0 +1,27 @@
+algorithm = "mc"
+id = "mc-stable-v1"
+name = "Monte Carlo agent — confirmed learning rate"
+device = "cuda:0"
+
+[training]
+iterations = 200
+games_per_iteration = 128
+batch_size = 128
+inference_batch_games = 128
+learning_rate = 0.0001
+epsilon_start = 0.3
+epsilon_end = 0.05
+seed = 42
+evaluation_interval = 10
+evaluation_games = 100 # Per baseline and historical evaluation opponent.
+
+# Confirmed full-budget settings. Replay remains off: no additional gain was established.
+[training.opponents]
+self_play = 80
+random_checkpoint = 20
+
+[training.historical_sampling]
+adaptive = false
+snapshot_interval = 10
+learning_rate = 0.01
+uniform_fraction = 0.0

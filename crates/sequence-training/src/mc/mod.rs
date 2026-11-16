@@ -1,6 +1,13 @@
+pub mod ablation;
+mod replay_buffer;
+use replay_buffer::ReplayBuffer;
+pub use replay_buffer::ReplayConfig;
+mod diagnostics;
+pub use diagnostics::PolicyDiagnostics;
 mod evaluation;
 pub use evaluation::{
     BaselineEvaluation, EvaluationConfig, EvaluationGame, evaluate_seeded_baselines,
+    evaluate_seeded_panel,
 };
 #[cfg(test)]
 mod mixed_tests;
@@ -11,7 +18,10 @@ mod sampling;
 pub use sampling::SamplingStrategy;
 
 use opponents::{CheckpointPool, OpponentPolicy, OpponentState};
-pub use opponents::{OpponentEvaluation, OpponentKind, OpponentMetrics, OpponentMix};
+pub use opponents::{
+    HistoricalProbability, HistoricalSampling, OpponentEvaluation, OpponentKind, OpponentMetrics,
+    OpponentMix,
+};
 
 use burn::{
     optim::{GradientsParams, ModuleOptimizer},
@@ -41,13 +51,18 @@ pub struct TrainingConfig {
     pub learning_rate: f64,
     pub epsilon_start: f64,
     pub epsilon_end: f64,
+    /// None preserves the legacy decay over total iterations. Set explicitly
+    /// to extend training without slowing or restarting exploration decay.
+    pub epsilon_decay_iterations: Option<usize>,
     pub seed: u64,
     pub evaluation_interval: usize,
     pub evaluation_games: usize,
     pub opponents: OpponentMix,
+    pub historical_sampling: HistoricalSampling,
     pub sampling: SamplingStrategy,
     /// Fixed full gradient batches per iteration; None uses the fresh sample count.
     pub updates_per_iteration: Option<usize>,
+    pub replay: Option<ReplayConfig>,
 }
 
 impl Default for TrainingConfig {
@@ -57,15 +72,18 @@ impl Default for TrainingConfig {
             games_per_iteration: 128,
             batch_size: 256,
             inference_batch_games: 16,
-            learning_rate: 3e-4,
+            learning_rate: 1e-4,
             epsilon_start: 0.2,
             epsilon_end: 0.05,
+            epsilon_decay_iterations: None,
             seed: 42,
             evaluation_interval: 10,
             evaluation_games: 20,
             opponents: OpponentMix::default(),
+            historical_sampling: HistoricalSampling::default(),
             sampling: SamplingStrategy::Natural,
             updates_per_iteration: None,
+            replay: None,
         }
     }
 }
@@ -79,6 +97,10 @@ pub struct IterationMetrics {
     pub optimization_samples: usize,
     #[serde(default)]
     pub updates: usize,
+    #[serde(default)]
+    pub replay_samples: usize,
+    #[serde(default)]
+    pub replay_size: usize,
     /// Fixed-budget runs derive episode seeds independently of sample selection.
     #[serde(default)]
     pub rollout_seed: Option<u64>,
@@ -88,6 +110,8 @@ pub struct IterationMetrics {
     pub evaluation_opponents: Vec<OpponentEvaluation>,
     #[serde(default)]
     pub opponents: Vec<OpponentMetrics>,
+    #[serde(default)]
+    pub historical_distribution: Vec<HistoricalProbability>,
     pub epsilon: f64,
     /// Red wins, Blue wins, draws.
     pub outcomes: [usize; 3],
@@ -127,6 +151,12 @@ pub fn train(
 }
 
 impl TrainingConfig {
+    fn epsilon_at(&self, iteration: usize) -> f64 {
+        let horizon = self.epsilon_decay_iterations.unwrap_or(self.iterations);
+        let fraction = (iteration as f64 / horizon.saturating_sub(1).max(1) as f64).min(1.0);
+        self.epsilon_start + fraction * (self.epsilon_end - self.epsilon_start)
+    }
+
     pub fn validate(&self) -> Result<(), sequence_agent::AgentError> {
         if self.iterations == 0
             || self.games_per_iteration == 0
@@ -158,9 +188,34 @@ impl TrainingConfig {
                     .into(),
             );
         }
+        if self.epsilon_decay_iterations == Some(0) {
+            return Err("epsilon_decay_iterations must be positive".into());
+        }
+        if let Some(replay) = &self.replay {
+            replay.validate()?;
+        }
         self.opponents.validate()?;
+        self.historical_sampling.validate()?;
         Ok(())
     }
+}
+
+fn resume_compatible(saved: &TrainingConfig, requested: &TrainingConfig) -> bool {
+    if requested.iterations < saved.iterations {
+        return false;
+    }
+    let mut normalized = saved.clone();
+    normalized.epsilon_decay_iterations =
+        Some(saved.epsilon_decay_iterations.unwrap_or(saved.iterations));
+    normalized.iterations = requested.iterations;
+    normalized.inference_batch_games = requested.inference_batch_games;
+    let mut requested = requested.clone();
+    requested.epsilon_decay_iterations = Some(
+        requested
+            .epsilon_decay_iterations
+            .unwrap_or(requested.iterations),
+    );
+    normalized == requested
 }
 
 /// Like `train`, with a callback after each completed optimization iteration.
@@ -206,6 +261,7 @@ pub struct TrainingCheckpoint<'a> {
     metadata: &'a ResumeMetadata,
     best_model: Option<&'a ValueNet>,
     pool: Option<&'a CheckpointPool>,
+    replay: Option<&'a ReplayBuffer>,
 }
 
 impl TrainingCheckpoint<'_> {
@@ -233,6 +289,9 @@ impl TrainingCheckpoint<'_> {
         }
         if let Some(pool) = self.pool {
             pool.save(staging.path())?;
+        }
+        if let Some(replay) = self.replay {
+            replay.save(&staging.path().join("replay.bin"))?;
         }
         std::fs::write(
             staging.path().join("state.json"),
@@ -267,15 +326,20 @@ pub fn train_resumable(
         best_score: None,
         opponents: Some(OpponentState::new(config.seed)),
     };
+    let mut replay_buffer = if let (Some(replay), Some(path)) = (&config.replay, resume) {
+        ReplayBuffer::load(&path.join("replay.bin"), replay.capacity)?
+    } else {
+        ReplayBuffer::default()
+    };
     let mut best_model = None;
     if let Some(path) = resume {
         metadata = serde_json::from_reader(std::fs::File::open(path.join("state.json"))?)?;
-        // Scheduling is an execution choice. All learning settings, including
-        // total iterations and the exploration schedule, remain immutable.
-        metadata.config.inference_batch_games = config.inference_batch_games;
-        if ![1, 2].contains(&metadata.version) || metadata.config != *config {
+        // Only extend the training budget when the effective exploration horizon
+        // stays identical. Other learning settings remain immutable.
+        if ![1, 2].contains(&metadata.version) || !resume_compatible(&metadata.config, config) {
             return Err("checkpoint version or training configuration differs".into());
         }
+        metadata.config = config.clone();
         if metadata.report.iterations.len() > config.iterations
             || metadata
                 .report
@@ -312,6 +376,13 @@ pub fn train_resumable(
             {
                 return Err("invalid opponent checkpoint manifest".into());
             }
+            if opponent_state
+                .qualities
+                .iter()
+                .any(|(i, q)| !q.is_finite() || !opponent_state.checkpoints.contains(i))
+            {
+                return Err("invalid historical opponent qualities".into());
+            }
             pool.restore(path, &opponent_state.checkpoints)?;
         } else {
             pool.insert(0, &net)?;
@@ -330,8 +401,7 @@ pub fn train_resumable(
     let opponent_state = opponents.as_mut().unwrap();
     for iteration in report.iterations.len()..config.iterations {
         let iteration_started = Instant::now();
-        let fraction = iteration as f64 / config.iterations.saturating_sub(1).max(1) as f64;
-        let epsilon = config.epsilon_start + fraction * (config.epsilon_end - config.epsilon_start);
+        let epsilon = config.epsilon_at(iteration);
 
         let mut samples = Vec::new();
         let mut results = [0usize; 3];
@@ -351,10 +421,14 @@ pub fn train_resumable(
                 ..Default::default()
             })
             .collect();
-        let plans =
-            config
-                .opponents
-                .schedule(config.games_per_iteration, iteration, opponent_state);
+        let historical_distribution =
+            opponent_state.distribution(iteration, &config.historical_sampling);
+        let plans = config.opponents.schedule_with(
+            config.games_per_iteration,
+            iteration,
+            opponent_state,
+            &config.historical_sampling,
+        );
         let mut opponent_metrics: BTreeMap<_, OpponentMetrics> = BTreeMap::new();
         let rollout = rollout::play_opponents(
             &net,
@@ -392,6 +466,11 @@ pub fn train_resumable(
                 plan.source != OpponentKind::SelfPlay && plan.policy == OpponentPolicy::SelfPlay,
             );
             metrics.outcomes[outcome_index(outcome, plan.learner_seat)] += 1;
+            opponent_state.observe(
+                plan,
+                outcome_index(outcome, plan.learner_seat) == 0,
+                &config.historical_sampling,
+            )?;
             let mut game = Simple::from_seed(record.header.config.game_seed);
             for step in &record.steps {
                 if plan.learns_from(step.actor as usize) {
@@ -423,7 +502,19 @@ pub fn train_resumable(
             iteration,
             &mut selection_rng,
         );
-        for &index in &selected {
+        let retained = if let Some(replay) = &config.replay {
+            replay_buffer.draws(
+                selected.len(),
+                replay.fraction,
+                iteration_seed(config.seed, iteration, 0xAE91_A750),
+            )
+        } else {
+            BTreeMap::new()
+        };
+        for (slot, &index) in selected.iter().enumerate() {
+            if retained.contains_key(&slot) {
+                continue;
+            }
             opponent_metrics
                 .get_mut(&samples[index].2)
                 .unwrap()
@@ -431,9 +522,25 @@ pub fn train_resumable(
         }
         let mut total_loss = Tensor::<1>::zeros([1], &device.clone().without_autodiff());
         let optimization_started = Instant::now();
-        for minibatch in selected.chunks(config.batch_size) {
-            let inputs: Vec<_> = minibatch.iter().map(|&i| samples[i].0.clone()).collect();
-            let targets: Vec<_> = minibatch.iter().map(|&i| samples[i].1).collect();
+        for (batch_index, minibatch) in selected.chunks(config.batch_size).enumerate() {
+            let examples: Vec<_> = minibatch
+                .iter()
+                .enumerate()
+                .map(|(offset, &index)| {
+                    let slot = batch_index * config.batch_size + offset;
+                    if let Some(&old) = retained.get(&slot) {
+                        let s = replay_buffer.get(old);
+                        (&s.0, s.1)
+                    } else {
+                        (&samples[index].0, samples[index].1)
+                    }
+                })
+                .collect();
+            let inputs: Vec<_> = examples
+                .iter()
+                .map(|(encoded, _)| (*encoded).clone())
+                .collect();
+            let targets: Vec<_> = examples.iter().map(|(_, target)| *target).collect();
             let (board, context) = batch(&inputs, &device);
             let targets =
                 Tensor::<2>::from_data(TensorData::new(targets, [inputs.len(), 1]), &device);
@@ -449,6 +556,9 @@ pub fn train_resumable(
             .map_err(|e| format!("reading training loss: {e}"))? as f64
             / selected.len() as f64;
         let optimization_time = optimization_started.elapsed();
+        if let Some(replay) = &config.replay {
+            replay_buffer.extend(samples.iter().map(|s| (&s.0, s.1)), replay.capacity);
+        }
         let evaluation_started = Instant::now();
         let mut evaluation_inference = McInferenceMetrics::default();
         let mut evaluation_opponents = Vec::new();
@@ -479,11 +589,14 @@ pub fn train_resumable(
             samples: samples.len(),
             optimization_samples: selected.len(),
             updates: selected.len().div_ceil(config.batch_size),
+            replay_samples: retained.len(),
+            replay_size: replay_buffer.len(),
             rollout_seed,
             mse,
             evaluation_score,
             evaluation_opponents,
             opponents: opponent_metrics.into_values().collect(),
+            historical_distribution,
             epsilon,
             outcomes: results,
             reward,
@@ -524,6 +637,7 @@ pub fn train_resumable(
             metadata: &snapshot_metadata,
             best_model: best_model.as_ref(),
             pool: pool.as_ref(),
+            replay: config.replay.as_ref().map(|_| &replay_buffer),
         })?;
     }
 
@@ -598,6 +712,7 @@ fn evaluate_history(
         let configs = evaluation_configs(config.evaluation_games, 0xEB10_0000);
         let plans: Vec<_> = (0..configs.len())
             .map(|index| OpponentPlan {
+                historical_sample: None,
                 source: OpponentKind::RandomCheckpoint,
                 policy,
                 learner_seat: index % 2,
@@ -680,6 +795,34 @@ mod tests {
     };
     use sequence_runner::Replay;
     use sequence_runner::{MatchRunner, Participant};
+
+    #[test]
+    fn extended_budget_preserves_exploration_and_rejects_learning_changes() {
+        let saved = TrainingConfig {
+            iterations: 200,
+            ..Default::default()
+        };
+        let mut extended = TrainingConfig {
+            iterations: 1000,
+            epsilon_decay_iterations: Some(200),
+            ..saved.clone()
+        };
+        assert!(resume_compatible(&saved, &extended));
+        for i in 0..200 {
+            assert_eq!(saved.epsilon_at(i), extended.epsilon_at(i));
+        }
+        assert!((extended.epsilon_at(999) - saved.epsilon_end).abs() < 1e-12);
+        extended.epsilon_decay_iterations = None;
+        assert!(!resume_compatible(&saved, &extended));
+        extended.epsilon_decay_iterations = Some(200);
+        extended.learning_rate *= 2.;
+        assert!(!resume_compatible(&saved, &extended));
+        extended = saved.clone();
+        extended.iterations = 100;
+        assert!(!resume_compatible(&saved, &extended));
+        extended.epsilon_decay_iterations = Some(0);
+        assert!(extended.validate().is_err());
+    }
 
     #[test]
     fn resumed_training_matches_uninterrupted_updates() {

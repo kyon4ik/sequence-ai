@@ -5,9 +5,50 @@ use sequence_agent::{AgentError, mc::ValueNet};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
+
+/// Historical sampling settings. Uniform defaults preserve existing runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoricalSampling {
+    pub adaptive: bool,
+    pub snapshot_interval: usize,
+    pub learning_rate: f64,
+    pub uniform_fraction: f64,
+}
+
+impl Default for HistoricalSampling {
+    fn default() -> Self {
+        Self {
+            adaptive: false,
+            snapshot_interval: 1,
+            learning_rate: 0.01,
+            uniform_fraction: 0.0,
+        }
+    }
+}
+
+impl HistoricalSampling {
+    pub(super) fn validate(&self) -> Result<(), AgentError> {
+        if self.snapshot_interval == 0
+            || !self.learning_rate.is_finite()
+            || self.learning_rate <= 0.0
+            || !(0.0..=1.0).contains(&self.uniform_fraction)
+        {
+            return Err("invalid historical sampling settings".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HistoricalProbability {
+    pub iteration: usize,
+    pub quality: f64,
+    pub probability: f64,
+}
 
 /// Relative proportions of games, rather than gradient samples. An omitted
 /// table defaults to self-play; omitted entries in a supplied table are zero.
@@ -86,16 +127,28 @@ impl OpponentMix {
         counts
     }
 
+    #[cfg(test)]
     pub(super) fn schedule(
         &self,
         games: usize,
         completed: usize,
         state: &mut OpponentState,
     ) -> Vec<OpponentPlan> {
+        self.schedule_with(games, completed, state, &HistoricalSampling::default())
+    }
+
+    pub(super) fn schedule_with(
+        &self,
+        games: usize,
+        completed: usize,
+        state: &mut OpponentState,
+        sampling: &HistoricalSampling,
+    ) -> Vec<OpponentPlan> {
         // Preserve legacy rollout/shuffle RNG consumption and game order.
         if self.is_self_play() {
             return (0..games)
                 .map(|index| OpponentPlan {
+                    historical_sample: None,
                     source: OpponentKind::SelfPlay,
                     policy: OpponentPolicy::SelfPlay,
                     learner_seat: index % 2,
@@ -108,6 +161,7 @@ impl OpponentMix {
             .copied()
             .filter(|&i| i < completed)
             .collect();
+        let distribution = state.distribution(completed, sampling);
         let mut plans = Vec::with_capacity(games);
         for (kind_index, (source, count)) in OpponentKind::ALL
             .into_iter()
@@ -115,6 +169,7 @@ impl OpponentMix {
             .enumerate()
         {
             for index in 0..count {
+                let mut historical_sample = None;
                 let policy = match source {
                     OpponentKind::SelfPlay => OpponentPolicy::SelfPlay,
                     OpponentKind::Greedy => OpponentPolicy::Greedy,
@@ -128,18 +183,34 @@ impl OpponentMix {
                         .map(OpponentPolicy::Checkpoint)
                         .unwrap_or(OpponentPolicy::SelfPlay),
                     OpponentKind::RandomCheckpoint => {
-                        if historical.is_empty() {
+                        if distribution.is_empty() {
                             OpponentPolicy::SelfPlay
                         } else {
-                            OpponentPolicy::Checkpoint(
-                                historical[state.rng.random_range(0..historical.len())],
-                            )
+                            let selected = if sampling.adaptive {
+                                let draw = state.rng.random::<f64>();
+                                let mut cumulative = 0.0;
+                                distribution
+                                    .iter()
+                                    .find(|entry| {
+                                        cumulative += entry.probability;
+                                        draw < cumulative
+                                    })
+                                    .unwrap_or(distribution.last().unwrap())
+                            } else {
+                                &distribution[state.rng.random_range(0..distribution.len())]
+                            };
+                            if sampling.adaptive {
+                                historical_sample =
+                                    Some((selected.probability, distribution.len()));
+                            }
+                            OpponentPolicy::Checkpoint(selected.iteration)
                         }
                     }
                 };
                 plans.push(OpponentPlan {
                     source,
                     policy,
+                    historical_sample,
                     learner_seat: (index + completed + kind_index) % 2,
                 });
             }
@@ -189,6 +260,7 @@ impl OpponentPolicy {
 
 #[derive(Clone, Debug)]
 pub(super) struct OpponentPlan {
+    pub historical_sample: Option<(f64, usize)>,
     pub source: OpponentKind,
     pub policy: OpponentPolicy,
     pub learner_seat: usize,
@@ -229,14 +301,84 @@ pub(super) struct OpponentState {
     pub rng: Xoshiro256PlusPlus,
     pub checkpoints: Vec<usize>,
     pub best_iteration: Option<usize>,
+    #[serde(default)]
+    pub qualities: BTreeMap<usize, f64>,
 }
 
 impl OpponentState {
+    pub fn distribution(
+        &mut self,
+        completed: usize,
+        config: &HistoricalSampling,
+    ) -> Vec<HistoricalProbability> {
+        let eligible: Vec<_> = self
+            .checkpoints
+            .iter()
+            .copied()
+            .filter(|i| *i < completed && i % config.snapshot_interval == 0)
+            .collect();
+        for &i in &eligible {
+            let max = self
+                .qualities
+                .values()
+                .copied()
+                .reduce(f64::max)
+                .unwrap_or(0.0);
+            self.qualities.entry(i).or_insert(max);
+        }
+        let max = eligible
+            .iter()
+            .map(|i| self.qualities[i])
+            .reduce(f64::max)
+            .unwrap_or(0.0);
+        let sum: f64 = eligible
+            .iter()
+            .map(|i| (self.qualities[i] - max).exp())
+            .sum();
+        eligible
+            .iter()
+            .map(|i| HistoricalProbability {
+                iteration: *i,
+                quality: self.qualities[i],
+                probability: if config.adaptive {
+                    (1.0 - config.uniform_fraction) * (self.qualities[i] - max).exp() / sum
+                        + config.uniform_fraction / eligible.len() as f64
+                } else {
+                    1.0 / eligible.len() as f64
+                },
+            })
+            .collect()
+    }
+
+    pub fn observe(
+        &mut self,
+        plan: &OpponentPlan,
+        won: bool,
+        config: &HistoricalSampling,
+    ) -> Result<(), AgentError> {
+        if won
+            && let (OpponentPolicy::Checkpoint(i), Some((p, n))) =
+                (plan.policy, plan.historical_sample)
+        {
+            let quality = self
+                .qualities
+                .get_mut(&i)
+                .expect("sampled opponent has quality");
+            let updated = *quality - config.learning_rate / (n as f64 * p);
+            if !updated.is_finite() {
+                return Err("historical quality update overflow".into());
+            }
+            *quality = updated;
+        }
+        Ok(())
+    }
+
     pub fn new(seed: u64) -> Self {
         Self {
             rng: Xoshiro256PlusPlus::seed_from_u64(seed ^ 0x0FF0_4E47),
             checkpoints: Vec::new(),
             best_iteration: None,
+            qualities: BTreeMap::new(),
         }
     }
 }
@@ -345,6 +487,91 @@ mod tests {
             random_checkpoint: 15.,
             greedy: 10.,
         }
+    }
+
+    #[test]
+    fn adaptive_sampling_updates_and_resumes() {
+        let config = HistoricalSampling {
+            adaptive: true,
+            snapshot_interval: 10,
+            ..Default::default()
+        };
+        let mut state = OpponentState::new(43);
+        state.checkpoints = (0..=21).collect();
+        let initial = state.distribution(11, &config);
+        assert_eq!(
+            initial.iter().map(|p| p.iteration).collect::<Vec<_>>(),
+            vec![0, 10]
+        );
+        assert_eq!(initial[0].probability, 0.5);
+        let plan = OpponentPlan {
+            source: OpponentKind::RandomCheckpoint,
+            policy: OpponentPolicy::Checkpoint(0),
+            learner_seat: 0,
+            historical_sample: Some((0.5, 2)),
+        };
+        state.observe(&plan, false, &config).unwrap();
+        assert_eq!(state.qualities[&0], 0.0);
+        state.observe(&plan, true, &config).unwrap();
+        assert_eq!(state.qualities[&0], -0.01);
+        assert!(state.distribution(11, &config)[0].probability < 0.5);
+        let expanded = state.distribution(21, &config);
+        assert_eq!(expanded[2].quality, 0.0);
+        let mix = OpponentMix {
+            random_checkpoint: 20.,
+            self_play: 80.,
+            ..Default::default()
+        };
+        let mut restored = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        let signature = |plans: Vec<OpponentPlan>| {
+            plans
+                .into_iter()
+                .map(|p| (p.policy, p.learner_seat, p.historical_sample))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            signature(mix.schedule_with(100, 21, &mut state, &config)),
+            signature(mix.schedule_with(100, 21, &mut restored, &config))
+        );
+        let mixed = HistoricalSampling {
+            uniform_fraction: 0.1,
+            ..config
+        };
+        state.qualities.insert(0, -1000.0);
+        let distribution = state.distribution(21, &mixed);
+        assert!(distribution.iter().all(|p| p.probability >= 0.1 / 3.0));
+        assert!((distribution.iter().map(|p| p.probability).sum::<f64>() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn historical_sampling_validation() {
+        assert!(HistoricalSampling::default().validate().is_ok());
+        for value in [-1.0, f64::NAN, f64::INFINITY, 1.1] {
+            assert!(
+                HistoricalSampling {
+                    uniform_fraction: value,
+                    ..Default::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            HistoricalSampling {
+                snapshot_interval: 0,
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            HistoricalSampling {
+                learning_rate: 0.0,
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

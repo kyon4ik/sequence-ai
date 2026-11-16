@@ -29,6 +29,7 @@ fn assert_mixed_rollout(device: Device) {
     let plans: Vec<_> = policies
         .flat_map(|policy| {
             (0..2).map(move |learner_seat| OpponentPlan {
+                historical_sample: None,
                 source: OpponentKind::RandomCheckpoint,
                 policy,
                 learner_seat,
@@ -189,9 +190,28 @@ fn cuda_fixed_budget_opponent_sampling_resumes() {
     assert_mixed_resume(Device::cuda(0), true);
 }
 
+#[test]
+#[ignore = "requires host NVIDIA GPU access; run outside the sandbox"]
+fn cuda_adaptive_training_resumes() {
+    assert_mixed_resume_with(Device::cuda(0), false, true);
+}
+
+#[test]
+fn adaptive_training_resumes() {
+    assert_mixed_resume_with(Device::flex(), false, true);
+}
+
 fn assert_mixed_resume(device: Device, balanced: bool) {
+    assert_mixed_resume_with(device, balanced, false);
+}
+
+fn assert_mixed_resume_with(device: Device, balanced: bool, adaptive: bool) {
     device.seed(813);
     let config = TrainingConfig {
+        historical_sampling: HistoricalSampling {
+            adaptive,
+            ..Default::default()
+        },
         iterations: 3,
         games_per_iteration: 5,
         inference_batch_games: 3,
@@ -273,6 +293,10 @@ fn assert_mixed_resume(device: Device, balanced: bool) {
         }
         assert_eq!(expected.outcomes, actual.outcomes);
         assert_eq!(expected.opponents, actual.opponents);
+        assert_eq!(
+            expected.historical_distribution,
+            actual.historical_distribution
+        );
         assert_eq!(expected.evaluation_opponents, actual.evaluation_opponents);
         assert!((expected.mse - actual.mse).abs() < 1e-6);
         assert_eq!(actual.opponents.iter().map(|o| o.games).sum::<usize>(), 5);
@@ -356,4 +380,117 @@ fn assert_mixed_resume(device: Device, balanced: bool) {
     .err()
     .unwrap();
     assert!(error.to_string().contains("opponent checkpoint"));
+}
+
+#[test]
+fn extending_completed_training_matches_fixed_horizon_run() {
+    let device = Device::flex();
+    device.seed(911);
+    let net = ValueNet::new(&device);
+    let short = TrainingConfig {
+        iterations: 2,
+        games_per_iteration: 4,
+        batch_size: 128,
+        evaluation_interval: 1,
+        evaluation_games: 2,
+        opponents: OpponentMix {
+            self_play: 80.,
+            random_checkpoint: 20.,
+            ..Default::default()
+        },
+        historical_sampling: HistoricalSampling {
+            adaptive: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let extended = TrainingConfig {
+        iterations: 3,
+        epsilon_decay_iterations: Some(2),
+        ..short.clone()
+    };
+    let root = tempfile::tempdir().unwrap();
+    let snapshot = root.path().join("completed");
+    train_resumable(net.clone(), device.clone(), &short, None, |checkpoint| {
+        if checkpoint.report().iterations.len() == 2 {
+            checkpoint.save(&snapshot)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let resumed = train_resumable(
+        net.clone(),
+        device.clone(),
+        &extended,
+        Some(&snapshot),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let full = train_resumable(net, device, &extended, None, |_| Ok(())).unwrap();
+    for (a, b) in resumed
+        .report
+        .iterations
+        .iter()
+        .zip(&full.report.iterations)
+    {
+        assert_eq!(a.epsilon, b.epsilon);
+        assert_eq!(a.samples, b.samples);
+        assert_eq!(a.outcomes, b.outcomes);
+        assert_eq!(a.historical_distribution, b.historical_distribution);
+        assert!((a.mse - b.mse).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn retained_samples_resume_with_identical_buffer_and_updates() {
+    let device = Device::flex();
+    device.seed(901);
+    let config = TrainingConfig {
+        iterations: 3,
+        games_per_iteration: 5,
+        batch_size: 32,
+        evaluation_games: 2,
+        evaluation_interval: 1,
+        epsilon_start: 1.,
+        epsilon_end: 1.,
+        replay: Some(ReplayConfig {
+            capacity: 128,
+            fraction: 0.25,
+        }),
+        ..Default::default()
+    };
+    let root = tempfile::tempdir().unwrap();
+    let snapshot = root.path().join("snapshot");
+    let net = ValueNet::new(&device);
+    let full = train_resumable(net.clone(), device.clone(), &config, None, |state| {
+        if state.report().iterations.len() == 2 {
+            state.save(&snapshot)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(snapshot.join("replay.bin").exists());
+    let resumed = train_resumable(net, device, &config, Some(&snapshot), |_| Ok(())).unwrap();
+    for (a, b) in full
+        .report
+        .iterations
+        .iter()
+        .zip(&resumed.report.iterations)
+    {
+        assert_eq!(a.samples, b.samples);
+        assert_eq!(a.replay_samples, b.replay_samples);
+        assert_eq!(a.opponents, b.opponents);
+        assert!((a.mse - b.mse).abs() < 1e-6);
+        assert_eq!(
+            a.optimization_samples,
+            a.opponents
+                .iter()
+                .map(|o| o.optimization_samples)
+                .sum::<usize>()
+                + a.replay_samples
+        );
+    }
+    assert_eq!(full.report.iterations[0].replay_samples, 0);
+    assert!(full.report.iterations[1].replay_samples > 0);
+    assert_eq!(full.report.iterations[2].replay_size, 128);
 }

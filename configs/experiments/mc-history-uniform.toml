@@ -1,0 +1,27 @@
+algorithm = "mc"
+id = "mc-history-uniform-v1"
+name = "Monte Carlo agent — uniform historical opponents"
+device = "cuda:0"
+
+[training]
+iterations = 200
+games_per_iteration = 128
+batch_size = 128
+inference_batch_games = 128
+learning_rate = 0.0003
+epsilon_start = 0.3
+epsilon_end = 0.05
+seed = 42
+evaluation_interval = 10
+evaluation_games = 100 # Per baseline and historical evaluation opponent.
+
+# Same games, optimizer settings, and snapshot cadence in both comparisons.
+[training.opponents]
+self_play = 80
+random_checkpoint = 20
+
+[training.historical_sampling]
+adaptive = false
+snapshot_interval = 10
+learning_rate = 0.01
+uniform_fraction = 0.0
