@@ -29,7 +29,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Train and save a neural agent from a TOML experiment (currently MC self-play).
+    /// Train and save a neural agent from a TOML experiment (Monte Carlo with configurable opponents).
     Train {
         /// Resume into a new ID, preserving learning settings and exploration decay.
         #[arg(long)]
@@ -43,7 +43,7 @@ enum Command {
         #[arg(long, value_parser = parse_device)]
         device: Option<InferenceDevice>,
     },
-    /// Play two saved agent IDs/spec paths or built-ins: random, greedy, heuristic.
+    /// Play two saved agent IDs/spec paths or built-ins: random or greedy.
     Eval {
         agent_a: String,
         agent_b: String,

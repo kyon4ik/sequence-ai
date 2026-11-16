@@ -75,10 +75,21 @@ use sequence_training::mc::{train, TrainingConfig};
 
 let device = Device::cuda(0); // or Device::flex() for CPU
 device.seed(42);
-let output = train(ValueNet::new(&device), device, &TrainingConfig::default())?;
+let output = train(
+    ValueNet::new(&device),
+    device,
+    &TrainingConfig::default(),
+    None, // Resume checkpoint directory, if any.
+    |_| Ok(()), // Called after each completed iteration.
+)?;
 output.model.save_file("data/models/mc-v1.bpk")?;
 // Save output.report and an AgentSpec pointing to the checkpoint alongside it.
 ```
+
+The single `train` entry point handles fresh and resumed runs. Its callback
+receives a `TrainingCheckpoint`; call `checkpoint.report()` for progress or
+`checkpoint.save(path)` to publish complete state. Pass `Some(path)` as the
+resume argument to continue a saved run.
 
 The caller creates output directories. Reports contain per-iteration loss,
 epsilon, sample and episode counts, outcomes, rewards, and execution timings.

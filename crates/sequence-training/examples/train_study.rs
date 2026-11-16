@@ -4,7 +4,7 @@
 fn main() -> Result<(), sequence_agent::AgentError> {
     use burn::prelude::*;
     use sequence_agent::{AgentConfig, AgentDescriptor, AgentSpec, mc::ValueNet};
-    use sequence_training::mc::{TrainingConfig, train_resumable};
+    use sequence_training::mc::{TrainingConfig, train};
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
     #[derive(Serialize, Deserialize)]
@@ -35,7 +35,7 @@ fn main() -> Result<(), sequence_agent::AgentError> {
     )?;
     let device = Device::cuda(0);
     device.seed(manifest.training.seed);
-    let trained = train_resumable(
+    let trained = train(
         ValueNet::new(&device),
         device,
         &manifest.training,

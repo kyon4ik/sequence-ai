@@ -237,7 +237,7 @@ fn assert_mixed_resume_with(device: Device, balanced: bool, adaptive: bool) {
     };
     let original = tempfile::tempdir().unwrap();
     let snapshot = original.path().join("iteration-2");
-    let output = train_resumable(
+    let output = train(
         ValueNet::new(&device),
         device.clone(),
         &config,
@@ -255,7 +255,7 @@ fn assert_mixed_resume_with(device: Device, balanced: bool, adaptive: bool) {
     std::fs::rename(&snapshot, &snapshot_moved).unwrap();
     drop(original);
     let resumed_snapshot = moved.path().join("resumed-3");
-    let resumed = train_resumable(
+    let resumed = train(
         ValueNet::new(&device),
         device.clone(),
         &config,
@@ -360,7 +360,7 @@ fn assert_mixed_resume_with(device: Device, balanced: bool, adaptive: bool) {
     let mut changed = config.clone();
     changed.opponents.greedy = 2.;
     assert!(
-        train_resumable(
+        train(
             ValueNet::new(&device),
             device.clone(),
             &changed,
@@ -370,7 +370,7 @@ fn assert_mixed_resume_with(device: Device, balanced: bool, adaptive: bool) {
         .is_err()
     );
     std::fs::remove_file(snapshot_moved.join("opponents/iteration-000000.bpk")).unwrap();
-    let error = train_resumable(
+    let error = train(
         ValueNet::new(&device),
         device,
         &config,
@@ -411,14 +411,14 @@ fn extending_completed_training_matches_fixed_horizon_run() {
     };
     let root = tempfile::tempdir().unwrap();
     let snapshot = root.path().join("completed");
-    train_resumable(net.clone(), device.clone(), &short, None, |checkpoint| {
+    train(net.clone(), device.clone(), &short, None, |checkpoint| {
         if checkpoint.report().iterations.len() == 2 {
             checkpoint.save(&snapshot)?;
         }
         Ok(())
     })
     .unwrap();
-    let resumed = train_resumable(
+    let resumed = train(
         net.clone(),
         device.clone(),
         &extended,
@@ -426,7 +426,7 @@ fn extending_completed_training_matches_fixed_horizon_run() {
         |_| Ok(()),
     )
     .unwrap();
-    let full = train_resumable(net, device, &extended, None, |_| Ok(())).unwrap();
+    let full = train(net, device, &extended, None, |_| Ok(())).unwrap();
     for (a, b) in resumed
         .report
         .iterations
@@ -462,7 +462,7 @@ fn retained_samples_resume_with_identical_buffer_and_updates() {
     let root = tempfile::tempdir().unwrap();
     let snapshot = root.path().join("snapshot");
     let net = ValueNet::new(&device);
-    let full = train_resumable(net.clone(), device.clone(), &config, None, |state| {
+    let full = train(net.clone(), device.clone(), &config, None, |state| {
         if state.report().iterations.len() == 2 {
             state.save(&snapshot)?;
         }
@@ -470,7 +470,7 @@ fn retained_samples_resume_with_identical_buffer_and_updates() {
     })
     .unwrap();
     assert!(snapshot.join("replay.bin").exists());
-    let resumed = train_resumable(net, device, &config, Some(&snapshot), |_| Ok(())).unwrap();
+    let resumed = train(net, device, &config, Some(&snapshot), |_| Ok(())).unwrap();
     for (a, b) in full
         .report
         .iterations

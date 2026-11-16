@@ -52,7 +52,7 @@ relative paths use the working directory. The directory defaults to `data/` and 
 ignored by Git. Storage currently uses files, not SQLite. A saved `agent.json`
 references its checkpoint relative to itself, so the model directory is portable.
 `eval` accepts a saved ID, an explicit `agent.json` path, or a built-in `random`,
-`greedy` or `heuristic` (`heuristic` aliases `greedy`). Both heuristic and neural
+`greedy`. Both heuristic and neural
 policies run through the existing `Agent` / `AgentFactory` interfaces. Custom
 heuristic weights can be stored as an `AgentSpec` JSON file.
 
@@ -132,7 +132,8 @@ directly under `replays/` are ignored; move them into a folder to browse them.
 
 ## Training snapshots and evaluation
 
-Training atomically publishes a directory after every completed iteration:
+The CLI atomically publishes a complete version-3 training checkpoint after every
+completed iteration:
 `models/<id>/checkpoints/iteration-NNNNNN/`. It contains `model.bpk`,
 `optimizer.bpk` (Adam moments and step counters), `state.json` (configuration,
 rollout/shuffle RNG state, iteration history and best score), and `best.bpk`
@@ -151,12 +152,11 @@ extend a completed 200-iteration run, set `iterations = 1000` and
 iteration-200 checkpoint into a new ID. Exploration stays at its final value
 after iteration 200. Resume requires an unchanged effective decay horizon and
 rejects other learning changes or a reduced iteration budget. The execution setting
-`training.inference_batch_games` may change on resume; old checkpoints and
-configs that omit it use the default of 16. The current network has no
+`training.inference_batch_games` may change on resume. The current network has no
 stochastic tensor layers; episode RNGs are recreated from seeds emitted by the
 saved training RNG. CPU continuation is tested against uninterrupted training;
-GPU numerical determinism still depends on kernels and hardware. Old weight-only
-snapshots remain valid for inference, but cannot resume training.
+GPU numerical determinism still depends on kernels and hardware. Resuming requires a complete version-3 checkpoint; inference weights alone
+cannot restore training state.
 
 `training.evaluation_interval` (default 10) controls periodic evaluation; the final
 iteration is always evaluated. `training.evaluation_games` (default 20, positive

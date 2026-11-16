@@ -108,8 +108,11 @@ impl ReplayBuffer {
         for _ in 0..count {
             file.read_exact(&mut bytes)?;
             let values: Vec<_> = bytes
-                .chunks_exact(4)
-                .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .copied()
+                .map(f32::from_le_bytes)
                 .collect();
             if values.iter().any(|v| !v.is_finite()) || ![-1., 0., 1.].contains(&values[450]) {
                 return Err("invalid replay sample".into());

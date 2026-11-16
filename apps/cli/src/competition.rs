@@ -153,9 +153,7 @@ pub fn tournament(store: &Store, path: &Path, device: Option<InferenceDevice>) -
         .collect::<Result<Vec<_>>>()?;
     let ids: HashSet<_> = specs.iter().map(|spec| &spec.descriptor.id).collect();
     if ids.len() != specs.len() {
-        bail!(
-            "tournament agents must have distinct descriptor IDs (greedy and heuristic are aliases)"
-        );
+        bail!("tournament agents must have distinct descriptor IDs");
     }
     run(store, "tournament", specs, config, device)
 }

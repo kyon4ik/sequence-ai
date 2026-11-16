@@ -9,8 +9,7 @@ implemented.
 
 ## Install
 
-Use a Rust toolchain with edition 2024 support. See
-[development setup](docs/development.md) for optional linker settings and checks.
+See [development](docs/development.md) for build commands and checks.
 
 From the repository root:
 

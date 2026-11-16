@@ -184,7 +184,7 @@ fn tournament_resolves_relative_specs_and_excludes_truncations_from_elo() {
         &["analyze", report["id"].as_str().unwrap(), "--format", "csv"],
     ));
     assert_eq!(String::from_utf8(csv.stdout).unwrap().lines().count(), 7);
-    fs::write(&config, "agents = ['greedy', 'heuristic']\n").unwrap();
+    fs::write(&config, "agents = ['greedy', 'greedy']\n").unwrap();
     assert!(
         !cli(&data, &["tournament", "--config", config.to_str().unwrap()])
             .status
@@ -197,6 +197,11 @@ fn errors_are_nonzero_and_replay_corruption_is_detected() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
     assert!(!cli(&data, &["eval", "missing", "random"]).status.success());
+    assert!(
+        !cli(&data, &["eval", "heuristic", "random"])
+            .status
+            .success()
+    );
     assert!(!data.exists());
     success(cli(
         &data,
@@ -309,7 +314,7 @@ fn train_save_reload_and_evaluate(device: &str) {
         &[
             "eval",
             "test-model",
-            "heuristic",
+            "greedy",
             "--games",
             "1",
             "--max-actions",

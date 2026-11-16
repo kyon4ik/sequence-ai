@@ -40,7 +40,7 @@ before or after the subcommand. Library callers resolve checkpoint paths themsel
 
 ## Training defaults
 
-These are [`TrainingConfig::default()`](../crates/sequence-training/src/mc/mod.rs)
+These are [`TrainingConfig::default()`](../crates/sequence-training/src/mc/config.rs)
 values. Example configs override them;
 the introductory and stable configs are not aliases for these defaults.
 
@@ -110,7 +110,7 @@ The runtime archive moves onto the checkpoint filesystem on first publication;
 immutable weights are hard-linked where possible, with copying as a fallback.
 Each snapshot can be moved and resumed independently, including into a new model
 ID. The opponent mix is part of the learning configuration and must match on
-resume. Legacy self-play snapshots remain resumable with self-play configs.
+resume.
 
 `report.json` includes per-category and actual-opponent game/sample counts,
 learner seats, learner wins/losses/draws and fallback counts. Self-play outcomes
@@ -183,7 +183,7 @@ Quality values and scheduler RNG are saved in checkpoint state. Sampling setting
 must match when resuming. Reports include `historical_distribution` (checkpoint,
 quality and probability before rollout), alongside per-opponent outcomes. The
 snapshot interval controls sampling eligibility, not archive storage: all weights
-remain archived for best/previous opponents and existing resume compatibility.
+remain archived for best/previous opponents and complete resumption.
 
 Compare equal interaction budgets, report optimization sample counts and elapsed
 time, and evaluate selected checkpoints on a separate fixed opponent panel with

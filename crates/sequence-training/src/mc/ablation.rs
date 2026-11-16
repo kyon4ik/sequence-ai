@@ -43,19 +43,14 @@ pub struct AblationRow {
     pub seconds: f64,
 }
 
-fn collect(
-    net: &ValueNet,
-    device: &Device,
-    configs: &[MatchConfig],
+fn collect_samples(
+    records: &[sequence_runner::MatchRecord],
     plans: &[opponents::OpponentPlan],
-    epsilon: f64,
-    pool: &CheckpointPool,
     state: &mut OpponentState,
     sampling: &HistoricalSampling,
 ) -> Result<Vec<Sample>, sequence_agent::AgentError> {
-    let output = rollout::play_opponents(net, device, configs, 64, epsilon, plans, Some(pool))?;
     let mut samples = Vec::new();
-    for (record, plan) in output.records.iter().zip(plans) {
+    for (record, plan) in records.iter().zip(plans) {
         let Termination::Completed(outcome) = record.termination else {
             return Err("incomplete ablation game".into());
         };
@@ -145,14 +140,11 @@ pub fn run_ablation(
     {
         return Err("invalid ablation budget".into());
     }
-    let metadata: ResumeMetadata =
-        serde_json::from_reader(std::fs::File::open(config.source.join("state.json"))?)?;
+    let metadata: ResumeMetadata = ResumeMetadata::load(&config.source)?;
     let completed = metadata.report.iterations.len();
     let learning = metadata.config;
     learning.validate()?;
-    let mut state = metadata
-        .opponents
-        .ok_or("ablation requires opponent state")?;
+    let mut state = metadata.opponents;
     if state.checkpoints != (0..=completed).collect::<Vec<_>>()
         || !learning.opponents.uses_history()
     {
@@ -204,13 +196,11 @@ pub fn run_ablation(
             } else {
                 1.0
             };
-        let fresh = collect(
-            &net,
-            &device,
-            &matches,
+        let rollout =
+            rollout::play_opponents(&net, &device, &matches, 64, epsilon, &plans, Some(&pool))?;
+        let fresh = collect_samples(
+            &rollout.records,
             &plans,
-            epsilon,
-            &pool,
             &mut state,
             &learning.historical_sampling,
         )?;
@@ -310,7 +300,7 @@ mod tests {
             },
             ..Default::default()
         };
-        train_resumable(
+        train(
             ValueNet::new(&device),
             device.clone(),
             &config,

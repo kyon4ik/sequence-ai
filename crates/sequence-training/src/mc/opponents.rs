@@ -144,7 +144,7 @@ impl OpponentMix {
         state: &mut OpponentState,
         sampling: &HistoricalSampling,
     ) -> Vec<OpponentPlan> {
-        // Preserve legacy rollout/shuffle RNG consumption and game order.
+        // Self-play needs no opponent scheduling randomness.
         if self.is_self_play() {
             return (0..games)
                 .map(|index| OpponentPlan {
@@ -301,7 +301,6 @@ pub(super) struct OpponentState {
     pub rng: Xoshiro256PlusPlus,
     pub checkpoints: Vec<usize>,
     pub best_iteration: Option<usize>,
-    #[serde(default)]
     pub qualities: BTreeMap<usize, f64>,
 }
 

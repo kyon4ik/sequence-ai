@@ -27,7 +27,7 @@ impl Store {
 
     #[cfg(feature = "burn")]
     pub fn reserve_model(&self, id: &str) -> Result<PathBuf> {
-        if matches!(id, "random" | "greedy" | "heuristic") {
+        if matches!(id, "random" | "greedy") {
             anyhow::bail!("{id:?} is a reserved built-in agent ID");
         }
         let path = self.model_dir(id)?;
@@ -44,18 +44,12 @@ impl Store {
     pub fn load_agent(&self, reference: &str, relative_to: &Path) -> Result<AgentSpec> {
         let config = match reference {
             "random" => Some(AgentConfig::Random),
-            "greedy" | "heuristic" => Some(AgentConfig::greedy()),
+            "greedy" => Some(AgentConfig::greedy()),
             _ => None,
         };
         if let Some(config) = config {
-            // Aliases share the same identity in rankings.
-            let id = if reference == "heuristic" {
-                "greedy"
-            } else {
-                reference
-            };
             return Ok(AgentSpec {
-                descriptor: AgentDescriptor::new(id, id),
+                descriptor: AgentDescriptor::new(reference, reference),
                 config,
             });
         }

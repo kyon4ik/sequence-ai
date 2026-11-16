@@ -1,6 +1,6 @@
 # GPU inference benchmarks
 
-[Research protocols](README.md) · [Inference configuration](../docs/configuration.md#inference-batching-and-timing) · [Development setup](../docs/development.md)
+[Research protocols](README.md) · [Inference configuration](../docs/configuration.md#inference-batching-and-timing) · [Development](../docs/development.md)
 
 These are measurements of specific checkpoints and workloads. For portable
 usage, the default `inference_batch_games` remains 16. Run benchmark commands
@@ -43,7 +43,7 @@ checkpoint writes. Sample counts, outcomes, rewards and MSE matched exactly in
 those three iterations; this does not guarantee identical trajectories on other
 hardware or workloads.
 
-Run the explicit GPU benchmark outside the sandbox, with no competing training:
+Run the explicit GPU benchmark with no competing training:
 
 ```sh
 SEQUENCE_BENCH_CHECKPOINT="$PWD/data/models/mc-v1-long/checkpoints/iteration-000100/model.bpk" \

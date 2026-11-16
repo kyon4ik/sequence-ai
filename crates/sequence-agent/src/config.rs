@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Portable policy parameters. Callers resolve checkpoint paths; artifact
-/// management belongs to the future storage crate.
+/// management belongs to the application.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentConfig {

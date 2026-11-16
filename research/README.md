@@ -9,8 +9,7 @@ limitations. For everyday training, start with `mc.toml` or `mc-stable.toml` in
 Run all commands from the repository root. Studies depend on local artifacts
 under ignored `data/`; a fresh checkout does not include their input models or
 saved results. Keep the prescribed seeds, input checkpoints, and configuration
-values when reproducing a study. GPU workflows require host GPU access; see
-[development setup](../docs/development.md).
+values when reproducing a study. GPU workflows require an NVIDIA GPU.
 
 ## Opponent sampling study
 
@@ -53,7 +52,7 @@ opponent archives. These originate from the corresponding history configs.
 
 `tools/regression_ablation.py` prepares and runs matched research continuations
 from the seed-42 uniform/adaptive checkpoint-50 archives. Build the examples,
-then run the driver from the repository root with host GPU access:
+then run the driver from the repository root:
 
 ```sh
 cargo build --release -p sequence-training --features burn --example ablation --example evaluate
@@ -91,7 +90,7 @@ the uniform/adaptive iteration-50 checkpoints, and
 [driver](../tools/learning_rate_confirmation.py) records the resolved plan and
 input hashes.
 
-Run the prespecified study with host GPU access:
+Run the prespecified study:
 
 ```sh
 cargo build --release -p sequence-training --features burn --example train_study --example evaluate
