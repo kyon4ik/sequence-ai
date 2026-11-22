@@ -117,7 +117,15 @@ fn card_effects_validate_turn_card_and_target() {
     assert_eq!(game.view(Player::Two).discard_piles[0], &[ACE]);
     assert_eq!(game.board.chip(position(0, 1)), Some(Player::One));
 
-    game.apply(Player::Two, play(REMOVAL, 0, 1)).unwrap();
+    let removal = play(REMOVAL, 0, 1);
+    let view = game.view(Player::Two);
+    assert!(view.preview_play(play(REMOVAL, 0, 2)).is_none());
+    let preview = view.preview_play(removal).unwrap();
+    assert!(preview.new_claims.is_empty());
+    assert!(!preview.wins);
+
+    game.apply(Player::Two, removal).unwrap();
+    assert_eq!(&preview.board, game.view(Player::One).board);
     assert_eq!(game.board.chip(position(0, 1)), None);
     game.apply(Player::One, play(WILD, 0, 2)).unwrap();
     assert_eq!(game.board.chip(position(0, 2)), Some(Player::One));
@@ -240,8 +248,14 @@ fn placement_claims_the_whole_largest_group_and_wins_before_drawing() {
         }
     }
 
-    game.apply(Player::One, play(WILD, 4, 4)).unwrap();
+    let winning_play = play(WILD, 4, 4);
+    let preview = game.view(Player::One).preview_play(winning_play).unwrap();
+    assert!(preview.wins);
+
+    game.apply(Player::One, winning_play).unwrap();
     let view = game.view(Player::One);
+    assert_eq!(&preview.board, view.board);
+    assert_eq!(preview.new_claims, view.claimed_sequences[0]);
     let lines: Vec<_> = view.claimed_sequences[0]
         .iter()
         .map(|sequence| *sequence.spaces())

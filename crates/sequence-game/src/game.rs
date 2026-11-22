@@ -94,6 +94,35 @@ pub struct PlayerView<'a> {
     pub legal_actions: Vec<Action>,
 }
 
+#[derive(Debug)]
+pub struct PlayPreview {
+    pub board: Board,
+    pub new_claims: Vec<Sequence>,
+    pub wins: bool,
+}
+
+impl PlayerView<'_> {
+    /// Previews the public effects of a legal card play before any draw.
+    pub fn preview_play(&self, action: Action) -> Option<PlayPreview> {
+        let Action::Play { card, target } = action else {
+            return None;
+        };
+        if !self.legal_actions.contains(&action) {
+            return None;
+        }
+
+        let mut board = self.board.clone();
+        let claimed = self.claimed_sequences[self.player.index()];
+        let new_claims = play_on_board(&mut board, self.player, card, target, claimed);
+
+        Some(PlayPreview {
+            board,
+            wins: claimed.len() + new_claims.len() >= SEQUENCES_TO_WIN,
+            new_claims,
+        })
+    }
+}
+
 /// Full game state for the caller that runs the game and supplies views to policies.
 pub struct Game {
     config: GameConfig,
@@ -276,17 +305,18 @@ impl Game {
         let player = self.current_player;
         self.consecutive_passes = 0;
 
-        if card.effect() == Effect::Remove {
-            self.board.set_chip(target, None);
-        } else {
-            self.board.set_chip(target, Some(player));
-            let claimed = &mut self.claimed[player.index()];
-            claimed.extend(new_claims(&self.board, player, target, claimed));
+        let claimed = &mut self.claimed[player.index()];
+        claimed.extend(play_on_board(
+            &mut self.board,
+            player,
+            card,
+            target,
+            claimed,
+        ));
 
-            if claimed.len() >= SEQUENCES_TO_WIN {
-                self.outcome = Some(Outcome::Win(player));
-                return;
-            }
+        if claimed.len() >= SEQUENCES_TO_WIN {
+            self.outcome = Some(Outcome::Win(player));
+            return;
         }
 
         self.draw_for_current_player();
@@ -313,6 +343,22 @@ impl Game {
             self.draw_pile.make_contiguous().shuffle(&mut self.rng);
         }
     }
+}
+
+fn play_on_board(
+    board: &mut Board,
+    player: Player,
+    card: Card,
+    target: Position,
+    claimed: &[Sequence],
+) -> Vec<Sequence> {
+    if card.effect() == Effect::Remove {
+        board.set_chip(target, None);
+        return Vec::new();
+    }
+
+    board.set_chip(target, Some(player));
+    new_claims(board, player, target, claimed)
 }
 
 #[cfg(test)]

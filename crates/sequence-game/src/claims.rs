@@ -7,6 +7,17 @@ const DIRECTIONS: [(isize, isize); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
 pub struct Sequence([Position; SEQUENCE_LENGTH]);
 
 impl Sequence {
+    /// Enumerates all five-space windows on the board.
+    pub fn all() -> impl Iterator<Item = Self> {
+        Position::all().flat_map(|start| {
+            DIRECTIONS
+                .into_iter()
+                .filter_map(move |(row_step, column_step)| {
+                    Self::through(start, 0, row_step, column_step)
+                })
+        })
+    }
+
     pub fn spaces(&self) -> &[Position; SEQUENCE_LENGTH] {
         &self.0
     }
@@ -25,7 +36,8 @@ impl Sequence {
         Some(Self(spaces))
     }
 
-    fn compatible_with(&self, other: &Self) -> bool {
+    /// Checks whether both windows can be claimed by the same player under the overlap rule.
+    pub fn compatible_with(&self, other: &Self) -> bool {
         self.0
             .iter()
             .filter(|position| !position.is_corner() && other.0.contains(position))
