@@ -17,9 +17,7 @@ fn config_reproduces_all_artifacts_when_both_policies_reach_the_limit() {
             "first_shuffle_seed": 18446744073709551615,
             "deal_count": 1,
             "policy_seed": 42,
-            "starting_seat": "two",
-            "action_limit": 1,
-            "bootstrap": {"seed": 42, "samples": 100}
+            "action_limit": 1
         }"#,
     )
     .unwrap();
@@ -64,7 +62,9 @@ fn config_reproduces_all_artifacts_when_both_policies_reach_the_limit() {
         summary["overall"]["score_bounds"],
         serde_json::json!([0.0, 1.0])
     );
-    assert!(summary["paired_ci_95"].is_null());
+    for field in ["paired_ci_95", "starts_ci_95", "moves_second_ci_95"] {
+        assert_eq!(summary.get(field), Some(&serde_json::Value::Null));
+    }
 
     for summary in ["{}", r#"{"board_layout":"concentric_rings"}"#] {
         fs::write(second.join("summary.json"), summary).unwrap();
@@ -103,7 +103,6 @@ fn config_reproduces_all_artifacts_when_both_policies_reach_the_limit() {
 
     let catalog = json_response(address, "/api/run");
     assert_eq!(catalog["policies"], serde_json::json!(["random", "random"]));
-    assert_eq!(catalog["starting_seat"], 1);
     let games = catalog["games"].as_array().unwrap();
     assert_eq!(games.len(), 2);
     assert_eq!(games[0]["policy_a_seat"], 0);
@@ -111,18 +110,20 @@ fn config_reproduces_all_artifacts_when_both_policies_reach_the_limit() {
     assert_eq!(games[1]["shuffle_seed"], u64::MAX.to_string());
     assert_eq!(games[1]["outcome"], "action_limit");
 
+    let first_game = json_response(address, "/api/games/1");
+    assert_eq!(first_game["frames"][0]["active_player"], 0);
     let replay = json_response(address, "/api/games/2");
     assert_eq!(replay["board"][1], "10♠");
     assert_eq!(replay["board"][19], "6♦");
     let frames = replay["frames"].as_array().unwrap();
     assert_eq!(frames.len(), 2);
-    assert_eq!(frames[0]["active_player"], 1);
+    assert_eq!(frames[0]["active_player"], 0);
     assert!(frames[1]["active_player"].is_null());
     let action = &replay["actions"][0];
-    assert_eq!(action["player"], 1);
+    assert_eq!(action["player"], 0);
     assert_eq!(action["kind"], "play");
     assert!(
-        frames[0]["hands"][1]
+        frames[0]["hands"][0]
             .as_array()
             .unwrap()
             .iter()
@@ -136,7 +137,7 @@ fn config_reproduces_all_artifacts_when_both_policies_reach_the_limit() {
     );
     let target = action["target"].as_u64().unwrap() as usize;
     assert!(frames[0]["chips"][target].is_null());
-    assert_eq!(frames[1]["chips"][target], 1);
+    assert_eq!(frames[1]["chips"][target], 0);
     assert!(get(address, "/api/games/3").starts_with("HTTP/1.1 404"));
 }
 

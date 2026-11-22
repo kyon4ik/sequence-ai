@@ -24,9 +24,8 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
     about = "Run reproducible Sequence policy matchups",
     long_about = concat!(
         "Run reproducible Sequence policy matchups. Copy experiments/random-vs-heuristic.json ",
-        "to define your own experiment. Choose random or heuristic for each policy ",
-        "and one or two for starting_seat.\n\n",
-        "Each deal is played twice with the policies in swapped seats. The figures show ",
+        "to define your own experiment. Choose random or heuristic for each policy.\n\n",
+        "Each deal is played twice with the policies in swapped seats. Seat one opens both games. The figures show ",
         "results for the first configured policy. Share the config and Git revision ",
         "to reproduce a run with cargo run --locked."
     )

@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
+const STARTING_PLAYER: Player = Player::One;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExperimentConfig {
@@ -16,16 +18,7 @@ pub struct ExperimentConfig {
     first_shuffle_seed: u64,
     deal_count: NonZeroUsize,
     policy_seed: u64,
-    pub starting_seat: Seat,
     action_limit: NonZeroUsize,
-    pub bootstrap: BootstrapConfig,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BootstrapConfig {
-    pub seed: u64,
-    pub samples: NonZeroUsize,
 }
 
 impl ExperimentConfig {
@@ -38,7 +31,7 @@ impl ExperimentConfig {
         let config = EvaluationConfig {
             policy_ids: self.policies.map(|policy| policy.to_string()),
             shuffle_seeds: (self.first_shuffle_seed..=last_seed).collect(),
-            starting_player: self.starting_seat.into(),
+            starting_player: STARTING_PLAYER,
             policy_seed: self.policy_seed,
             action_limit: self.action_limit,
             capture_replays: false,
@@ -184,7 +177,7 @@ impl GameRow {
             MatchConfig {
                 game: GameConfig {
                     shuffle_seed: self.shuffle_seed,
-                    starting_player: config.starting_seat.into(),
+                    starting_player: STARTING_PLAYER,
                     policies: [
                         self.player_one_policy.to_string(),
                         self.player_two_policy.to_string(),

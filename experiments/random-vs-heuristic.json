@@ -3,10 +3,5 @@
   "first_shuffle_seed": 0,
   "deal_count": 256,
   "policy_seed": 42,
-  "starting_seat": "one",
-  "action_limit": 512,
-  "bootstrap": {
-    "seed": 42,
-    "samples": 10000
-  }
+  "action_limit": 512
 }

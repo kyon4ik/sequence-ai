@@ -19,8 +19,8 @@ pub fn write_figures(directory: &Path, report: &EvaluationReport, summary: &Summ
 fn write_score(path: &Path, summary: &Summary) -> Result<()> {
     let rows = [
         (3, &summary.overall, summary.paired_ci_95),
-        (2, &summary.starts, None),
-        (1, &summary.moves_second, None),
+        (2, &summary.starts, summary.starts_ci_95),
+        (1, &summary.moves_second, summary.moves_second_ci_95),
     ]
     .map(|(y, score, ci)| {
         let value = score.score.map(|value| value * 100.0);
@@ -76,9 +76,14 @@ fn write_score(path: &Path, summary: &Summary) -> Result<()> {
 
     for (y, value, interval) in rows {
         if let Some([lower, upper]) = interval {
+            let color = if value.is_some() {
+                ACCENT.to_rgba()
+            } else {
+                INK.mix(0.55)
+            };
             chart.draw_series([PathElement::new(
                 [(lower, y), (upper, y)],
-                ACCENT.stroke_width(5),
+                color.stroke_width(5),
             )])?;
         }
         if let Some(value) = value {
@@ -86,10 +91,14 @@ fn write_score(path: &Path, summary: &Summary) -> Result<()> {
         }
     }
 
-    let note = match (summary.paired_ci_95, summary.overall.score) {
-        (Some(_), _) => "Overall bar shows the 95% paired bootstrap interval",
-        (None, Some(_)) => "A paired bootstrap interval requires at least two deals",
-        (None, None) => "Bars show score bounds when games reach the action limit",
+    let has_intervals = rows
+        .iter()
+        .any(|(_, value, interval)| value.is_some() && interval.is_some());
+    let note = match (has_intervals, summary.overall.score.is_none()) {
+        (true, false) => "Bars show 95% t-intervals",
+        (true, true) => "Teal bars show 95% t-intervals. Gray bars show score bounds.",
+        (false, false) => "95% t-intervals require at least two deals",
+        (false, true) => "Bars show score bounds when games reach the action limit",
     };
     footer.draw(&Text::new(
         format!("{} paired deals  |  {note}", summary.deals),

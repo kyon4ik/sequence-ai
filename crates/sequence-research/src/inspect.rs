@@ -199,7 +199,6 @@ impl Run {
         Catalog {
             name: &self.name,
             policies: self.config.policies,
-            starting_seat: Player::from(self.config.starting_seat).index(),
             games: self
                 .games
                 .values()
@@ -235,7 +234,6 @@ impl Run {
 struct Catalog<'a> {
     name: &'a str,
     policies: [AgentKind; 2],
-    starting_seat: usize,
     games: Vec<CatalogGame>,
 }
 

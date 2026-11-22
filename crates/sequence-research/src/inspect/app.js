@@ -78,8 +78,7 @@ function renderCatalog() {
   const counts = { all: 0, win: 0, loss: 0, draw: 0, action_limit: 0 };
   const visible = [];
   for (const row of run.games) {
-    const first = perspectiveSeat(row) === run.starting_seat;
-    const order = first ? "first" : "second";
+    const order = perspectiveSeat(row) === 0 ? "first" : "second";
     if (filters.moveOrder.value !== "all" && filters.moveOrder.value !== order) continue;
     if (search && search !== String(row.game_id) && search !== row.shuffle_seed) continue;
 

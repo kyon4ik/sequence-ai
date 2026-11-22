@@ -1,12 +1,11 @@
 use std::path::Path;
 
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
 use sequence_game::{Board, Outcome};
 use sequence_match::{EvaluationReport, MatchEnd};
 use serde::Serialize;
+use statrs::distribution::{ContinuousCDF, StudentsT};
 
-use crate::experiment::{AgentKind, BootstrapConfig, ExperimentConfig};
+use crate::experiment::{AgentKind, ExperimentConfig};
 
 #[derive(Serialize)]
 pub struct Summary {
@@ -18,6 +17,8 @@ pub struct Summary {
     pub moves_second: Score,
     pub median_actions: f64,
     pub paired_ci_95: Option<[f64; 2]>,
+    pub starts_ci_95: Option<[f64; 2]>,
+    pub moves_second_ci_95: Option<[f64; 2]>,
 }
 
 #[derive(Default, Serialize)]
@@ -77,18 +78,19 @@ impl Summary {
         let mut moves_second = Counts::default();
         let mut lengths = Vec::with_capacity(report.pairs.len() * 2);
         let mut pair_scores = Vec::with_capacity(report.pairs.len());
+        let starter_index = report.config.starting_player.index();
         for pair in &report.pairs {
-            let mut pair_points = 0.0;
+            let mut scores = [0.0; 2];
             for (policy_a_seat, game) in pair.iter().enumerate() {
-                let counts = if policy_a_seat == report.config.starting_player.index() {
+                let counts = if policy_a_seat == starter_index {
                     &mut starts
                 } else {
                     &mut moves_second
                 };
-                pair_points += counts.record(game.end, policy_a_seat);
+                scores[policy_a_seat] = counts.record(game.end, policy_a_seat);
                 lengths.push(game.action_count);
             }
-            pair_scores.push(pair_points / 2.0);
+            pair_scores.push(scores);
         }
 
         let totals = report.totals;
@@ -99,8 +101,21 @@ impl Summary {
             truncations: totals.truncations,
         }
         .score();
-        let paired_ci_95 = (totals.truncations == 0 && pair_scores.len() >= 2)
-            .then(|| bootstrap_interval(&pair_scores, &config.bootstrap));
+        let starts = starts.score();
+        let moves_second = moves_second.score();
+        let paired_ci_95 = confidence_interval(
+            overall.score,
+            pair_scores.iter().map(|&[one, two]| (one + two) / 2.0),
+        );
+        let starts_ci_95 = confidence_interval(
+            starts.score,
+            pair_scores.iter().map(|scores| scores[starter_index]),
+        );
+        let moves_second_ci_95 = confidence_interval(
+            moves_second.score,
+            pair_scores.iter().map(|scores| scores[1 - starter_index]),
+        );
+
         lengths.sort_unstable();
         let middle = lengths.len() / 2;
         Self {
@@ -108,10 +123,12 @@ impl Summary {
             policies: config.policies,
             deals: report.pairs.len(),
             overall,
-            starts: starts.score(),
-            moves_second: moves_second.score(),
+            starts,
+            moves_second,
             median_actions: (lengths[middle - 1] as f64 + lengths[middle] as f64) / 2.0,
             paired_ci_95,
+            starts_ci_95,
+            moves_second_ci_95,
         }
     }
 
@@ -126,42 +143,67 @@ impl Summary {
             score.counts.draws,
             score.counts.truncations
         );
-        if let Some(value) = score.score {
-            println!("A scored {:.2}%", value * 100.0);
-            if let Some([lower, upper]) = self.paired_ci_95 {
+
+        for (label, score, interval) in [
+            ("Overall", &self.overall, self.paired_ci_95),
+            ("Starts", &self.starts, self.starts_ci_95),
+            ("Moves second", &self.moves_second, self.moves_second_ci_95),
+        ] {
+            if let Some(value) = score.score {
+                print!("{label} {:.2}%", value * 100.0);
+                if let Some([lower, upper]) = interval {
+                    print!(
+                        " (95% t-interval {:.2}% to {:.2}%)",
+                        lower * 100.0,
+                        upper * 100.0
+                    );
+                }
+                println!();
+            } else {
+                let [lower, upper] = score.score_bounds;
                 println!(
-                    "Paired 95% bootstrap interval {:.2}% to {:.2}%",
+                    "{label} score bounds with unresolved games {:.2}% to {:.2}%",
                     lower * 100.0,
                     upper * 100.0
                 );
             }
-        } else {
-            let [lower, upper] = score.score_bounds;
-            println!(
-                "A's score bounds with unresolved games {:.2}% to {:.2}%",
-                lower * 100.0,
-                upper * 100.0
-            );
         }
         println!("Results written to {}", output.display());
     }
 }
 
-fn bootstrap_interval(pair_scores: &[f64], config: &BootstrapConfig) -> [f64; 2] {
-    let mut rng = ChaCha8Rng::seed_from_u64(config.seed);
-    let mut distribution = Vec::with_capacity(config.samples.get());
-    let count = pair_scores.len() as u64;
-    for _ in 0..config.samples.get() {
-        let total: f64 = (0..count)
-            .map(|_| pair_scores[rng.random_range(0..count) as usize])
-            .sum();
-        distribution.push(total / count as f64);
+fn confidence_interval(
+    mean: Option<f64>,
+    scores: impl ExactSizeIterator<Item = f64>,
+) -> Option<[f64; 2]> {
+    let mean = mean?;
+    let count = scores.len() as f64;
+    if count < 2.0 {
+        return None;
     }
-    distribution.sort_unstable_by(f64::total_cmp);
-    [0.025, 0.975].map(|probability| {
-        let rank = probability * (distribution.len() - 1) as f64;
-        let lower = distribution[rank.floor() as usize];
-        let upper = distribution[rank.ceil() as usize];
-        lower + rank.fract() * (upper - lower)
-    })
+
+    let degrees_of_freedom = count - 1.0;
+    let squared_deviations: f64 = scores.map(|score| (score - mean).powi(2)).sum();
+    let standard_error = (squared_deviations / degrees_of_freedom / count).sqrt();
+    let critical_value = StudentsT::new(0.0, 1.0, degrees_of_freedom)
+        .expect("at least two observations")
+        .inverse_cdf(0.975);
+    let margin = critical_value * standard_error;
+
+    Some([(mean - margin).max(0.0), (mean + margin).min(1.0)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confidence_interval;
+
+    #[test]
+    fn confidence_interval_uses_sample_variance_and_student_t() {
+        let scores = [0.25, 0.5, 0.5, 0.75, 0.75];
+        let [lower, upper] = confidence_interval(Some(0.55), scores.into_iter()).unwrap();
+
+        assert!((lower - 0.290_287_341_579).abs() < 1e-9);
+        assert!((upper - 0.809_712_658_421).abs() < 1e-9);
+        assert_eq!(confidence_interval(Some(0.5), [0.5].into_iter()), None);
+    }
 }
