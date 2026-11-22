@@ -1,0 +1,10 @@
+[package]
+name = "sequence-match"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+rand = { version = "0.9", default-features = false }
+rand_chacha = { version = "0.9", default-features = false }
+sequence-agents = { path = "../sequence-agents" }
+sequence-game = { path = "../sequence-game" }
