@@ -1,3 +1,6 @@
 # AI agents instructions
 CLAUDE.md
 AGENTS.md
+
+# Cargo build output
+/target/
