@@ -1,0 +1,13 @@
+{
+  "engine_and_policy_git_revision": "f0d63d8aeb626c21faf5ab0601603e1a93305dbb",
+  "command": "cargo run --locked --release --example baseline -- 256",
+  "starting_player": "One",
+  "policies": ["HeuristicAgent", "RandomAgent"],
+  "policy_seed": 42,
+  "shuffle_seeds_inclusive": [0, 255],
+  "games_per_shuffle": 2,
+  "seat_order": "swapped within each pair",
+  "action_limit": 512,
+  "bootstrap_seed": 42,
+  "bootstrap_samples": 10000
+}
