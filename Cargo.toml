@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/sequence-agents", "crates/sequence-game", "crates/sequence-match"]
+members = [
+    "crates/sequence-agents",
+    "crates/sequence-game",
+    "crates/sequence-match",
+    "crates/sequence-research",
+]
 resolver = "3"
 
 [workspace.package]

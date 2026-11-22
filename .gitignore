@@ -4,3 +4,6 @@ AGENTS.md
 
 # Cargo build output
 /target/
+
+# Generated experiment artifacts
+/results/
