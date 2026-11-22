@@ -74,12 +74,10 @@ impl Card {
         }
     }
 
-    pub(crate) fn label_index(self) -> Option<usize> {
-        (self.rank != Rank::Jack)
-            .then_some(self.suit as usize * NON_JACK_RANKS + self.rank as usize)
-    }
-
-    pub(crate) const fn from_label_index(index: usize) -> Self {
-        Self::new(RANKS[index % NON_JACK_RANKS], SUITS[index / NON_JACK_RANKS])
+    pub(crate) const fn label_index(self) -> Option<usize> {
+        match self.rank {
+            Rank::Jack => None,
+            _ => Some(self.suit as usize * NON_JACK_RANKS + self.rank as usize),
+        }
     }
 }

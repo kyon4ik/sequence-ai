@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use sequence_game::Outcome;
+use sequence_game::{Board, Outcome};
 use sequence_match::{EvaluationReport, MatchEnd};
 use serde::Serialize;
 
@@ -10,6 +10,7 @@ use crate::experiment::{AgentKind, BootstrapConfig, ExperimentConfig};
 
 #[derive(Serialize)]
 pub struct Summary {
+    pub board_layout: &'static str,
     pub policies: [AgentKind; 2],
     pub deals: usize,
     pub overall: Score,
@@ -103,6 +104,7 @@ impl Summary {
         lengths.sort_unstable();
         let middle = lengths.len() / 2;
         Self {
+            board_layout: Board::LAYOUT_ID,
             policies: config.policies,
             deals: report.pairs.len(),
             overall,

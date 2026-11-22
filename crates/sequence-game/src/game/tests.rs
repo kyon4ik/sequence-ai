@@ -1,5 +1,5 @@
 use super::*;
-use crate::{BOARD_SIZE, Rank, Space, Suit};
+use crate::{Rank, Space, Suit};
 
 const ACE: Card = Card::new(Rank::Ace, Suit::Clubs);
 const TWO: Card = Card::new(Rank::Two, Suit::Clubs);
@@ -18,24 +18,26 @@ fn position(row: usize, column: usize) -> Position {
     Position::new(row, column).unwrap()
 }
 
-fn play(card: Card, row: usize, column: usize) -> Action {
-    Action::Play {
-        card,
-        target: position(row, column),
-    }
+fn play(card: Card, target: Position) -> Action {
+    Action::Play { card, target }
 }
 
 #[test]
-fn board_layout_labels_two_spaces_per_non_jack() {
+fn board_layout_uses_the_supplied_grid() {
     let game = Game::new(config(Player::One));
     let board = game.view(Player::One).board;
 
+    for (target, card) in [
+        (position(0, 1), Card::new(Rank::Ten, Suit::Spades)),
+        (position(1, 9), Card::new(Rank::Six, Suit::Diamonds)),
+        (position(2, 8), Card::new(Rank::Two, Suit::Hearts)),
+        (position(4, 7), ACE),
+        (position(9, 8), ACE),
+    ] {
+        assert_eq!(board.space(target), Space::Labeled { card, chip: None });
+    }
+
     for target in Position::all() {
-        let reflected = position(
-            BOARD_SIZE - 1 - target.row(),
-            BOARD_SIZE - 1 - target.column(),
-        );
-        assert_eq!(board.space(target), board.space(reflected));
         assert_eq!(board.space(target) == Space::Corner, target.is_corner());
     }
 
@@ -87,27 +89,30 @@ fn card_effects_validate_turn_card_and_target() {
     game.hands = [vec![ACE, ACE, WILD], vec![REMOVAL]];
     game.consecutive_passes = 2;
 
-    let regular = play(ACE, 0, 1);
+    let ace_square = Board::matching_positions(ACE).unwrap()[0];
+    let two_square = Board::matching_positions(TWO).unwrap()[0];
+    let corner = position(0, 0);
+    let regular = play(ACE, ace_square);
     let actions = game.view(Player::One).legal_actions;
     assert_eq!(
         actions.iter().filter(|&&action| action == regular).count(),
         1
     );
-    assert!(!actions.contains(&play(WILD, 0, 0)));
+    assert!(!actions.contains(&play(WILD, corner)));
     assert_eq!(
         game.apply(Player::Two, regular),
         Err(ActionError::OutOfTurn)
     );
     assert_eq!(
-        game.apply(Player::One, play(ACE, 0, 2)),
+        game.apply(Player::One, play(ACE, two_square)),
         Err(ActionError::IllegalAction)
     );
     assert_eq!(
-        game.apply(Player::One, play(WILD, 0, 0)),
+        game.apply(Player::One, play(WILD, corner)),
         Err(ActionError::IllegalAction)
     );
     assert_eq!(
-        game.apply(Player::One, play(TWO, 0, 2)),
+        game.apply(Player::One, play(TWO, two_square)),
         Err(ActionError::IllegalAction)
     );
     assert_eq!(game.view(Player::One).hand, &[ACE, ACE, WILD]);
@@ -115,20 +120,20 @@ fn card_effects_validate_turn_card_and_target() {
     game.apply(Player::One, regular).unwrap();
     assert_eq!(game.view(Player::Two).consecutive_passes, 0);
     assert_eq!(game.view(Player::Two).discard_piles[0], &[ACE]);
-    assert_eq!(game.board.chip(position(0, 1)), Some(Player::One));
+    assert_eq!(game.board.chip(ace_square), Some(Player::One));
 
-    let removal = play(REMOVAL, 0, 1);
+    let removal = play(REMOVAL, ace_square);
     let view = game.view(Player::Two);
-    assert!(view.preview_play(play(REMOVAL, 0, 2)).is_none());
+    assert!(view.preview_play(play(REMOVAL, two_square)).is_none());
     let preview = view.preview_play(removal).unwrap();
     assert!(preview.new_claims.is_empty());
     assert!(!preview.wins);
 
     game.apply(Player::Two, removal).unwrap();
     assert_eq!(&preview.board, game.view(Player::One).board);
-    assert_eq!(game.board.chip(position(0, 1)), None);
-    game.apply(Player::One, play(WILD, 0, 2)).unwrap();
-    assert_eq!(game.board.chip(position(0, 2)), Some(Player::One));
+    assert_eq!(game.board.chip(ace_square), None);
+    game.apply(Player::One, play(WILD, two_square)).unwrap();
+    assert_eq!(game.board.chip(two_square), Some(Player::One));
     assert_eq!(
         game.view(Player::Two).discard_piles,
         [&[ACE, WILD][..], &[REMOVAL]]
@@ -146,6 +151,7 @@ fn exchange_can_precede_a_legal_play_and_replenishes_from_both_discards() {
         game.board.set_chip(target, Some(Player::Two));
     }
 
+    let two_square = Board::matching_positions(TWO).unwrap()[0];
     let mut replenished = [REMOVAL, ACE, WILD];
     replenished.shuffle(&mut game.rng.clone());
     assert!(
@@ -156,7 +162,7 @@ fn exchange_can_precede_a_legal_play_and_replenishes_from_both_discards() {
     assert!(
         game.view(Player::One)
             .legal_actions
-            .contains(&play(WILD, 0, 2))
+            .contains(&play(WILD, two_square))
     );
 
     game.apply(Player::One, Action::Exchange(ACE)).unwrap();
@@ -171,7 +177,7 @@ fn exchange_can_precede_a_legal_play_and_replenishes_from_both_discards() {
         replenished
     );
 
-    game.apply(Player::One, play(TWO, 0, 2)).unwrap();
+    game.apply(Player::One, play(TWO, two_square)).unwrap();
     assert_eq!(game.view(Player::One).hand, &[WILD, replenished[0]]);
     assert_eq!(game.current_player(), Some(Player::Two));
 }
@@ -248,7 +254,7 @@ fn placement_claims_the_whole_largest_group_and_wins_before_drawing() {
         }
     }
 
-    let winning_play = play(WILD, 4, 4);
+    let winning_play = play(WILD, position(4, 4));
     let preview = game.view(Player::One).preview_play(winning_play).unwrap();
     assert!(preview.wins);
 
@@ -289,7 +295,7 @@ fn claims_break_ties_in_board_order_and_protect_only_claimed_chips() {
         game.board.set_chip(position(1, column), Some(Player::One));
     }
 
-    game.apply(Player::One, play(WILD, 1, 3)).unwrap();
+    game.apply(Player::One, play(WILD, position(1, 3))).unwrap();
     let claims = game.view(Player::Two).claimed_sequences[0];
     assert_eq!(claims.len(), 1);
     assert_eq!(
@@ -297,12 +303,13 @@ fn claims_break_ties_in_board_order_and_protect_only_claimed_chips() {
         std::array::from_fn(|index| position(1, index + 1))
     );
     assert_eq!(
-        game.apply(Player::Two, play(REMOVAL, 1, 5)),
+        game.apply(Player::Two, play(REMOVAL, position(1, 5))),
         Err(ActionError::IllegalAction)
     );
-    game.apply(Player::Two, play(REMOVAL, 1, 7)).unwrap();
+    game.apply(Player::Two, play(REMOVAL, position(1, 7)))
+        .unwrap();
 
-    game.apply(Player::One, play(WILD, 1, 0)).unwrap();
+    game.apply(Player::One, play(WILD, position(1, 0))).unwrap();
     assert_eq!(game.view(Player::One).claimed_sequences[0].len(), 1);
     assert!(game.result().is_none());
 }

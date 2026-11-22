@@ -10,7 +10,7 @@ use std::{
 
 use sequence_game::{Action, BOARD_SIZE, Board, Card, Player, Position, Rank, Space, Suit};
 use sequence_match::{AppliedAction, Match};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::{
@@ -147,8 +147,28 @@ struct Run {
     games: BTreeMap<usize, GameRow>,
 }
 
+#[derive(Deserialize)]
+struct RunMetadata {
+    board_layout: Option<String>,
+}
+
 impl Run {
     fn load(directory: &Path) -> Result<Self> {
+        let summary_path = directory.join("summary.json");
+        let summary: RunMetadata = serde_json::from_reader(
+            fs::File::open(&summary_path)
+                .map_err(|error| format!("could not read {}: {error}", summary_path.display()))?,
+        )
+        .map_err(|error| format!("{}: {error}", summary_path.display()))?;
+        if summary.board_layout.as_deref() != Some(Board::LAYOUT_ID) {
+            return Err(format!(
+                "Replaying {} requires the {} board layout. Run the experiment again.",
+                directory.display(),
+                Board::LAYOUT_ID
+            )
+            .into());
+        }
+
         let config_path = directory.join("config.json");
         let config = serde_json::from_slice(
             &fs::read(&config_path)

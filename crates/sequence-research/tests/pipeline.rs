@@ -57,6 +57,7 @@ fn config_reproduces_all_artifacts_when_both_policies_reach_the_limit() {
     }
     let summary: serde_json::Value =
         serde_json::from_slice(&fs::read(first.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["board_layout"], "tabletop");
     assert_eq!(summary["overall"]["truncations"], 2);
     assert!(summary["overall"]["score"].is_null());
     assert_eq!(
@@ -64,6 +65,22 @@ fn config_reproduces_all_artifacts_when_both_policies_reach_the_limit() {
         serde_json::json!([0.0, 1.0])
     );
     assert!(summary["paired_ci_95"].is_null());
+
+    for summary in ["{}", r#"{"board_layout":"concentric_rings"}"#] {
+        fs::write(second.join("summary.json"), summary).unwrap();
+        let legacy = Command::new(executable)
+            .arg("inspect")
+            .arg(&second)
+            .args(["3", "--no-open"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&legacy.stderr);
+        assert!(!legacy.status.success());
+        assert!(
+            stderr.contains("requires the tabletop board layout"),
+            "{stderr}"
+        );
+    }
 
     let mut inspection = Viewer(
         Command::new(executable)
@@ -95,6 +112,8 @@ fn config_reproduces_all_artifacts_when_both_policies_reach_the_limit() {
     assert_eq!(games[1]["outcome"], "action_limit");
 
     let replay = json_response(address, "/api/games/2");
+    assert_eq!(replay["board"][1], "10♠");
+    assert_eq!(replay["board"][19], "6♦");
     let frames = replay["frames"].as_array().unwrap();
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0]["active_player"], 1);

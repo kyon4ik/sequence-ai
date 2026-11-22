@@ -72,7 +72,9 @@ fn assert_same_position(first: &Match, second: &Match) {
 
 #[test]
 fn manual_play_automatic_play_and_replay_share_the_same_transitions() {
-    let config = match_config(1_000);
+    let mut config = match_config(1_000);
+    // This deal exercises dead-card exchanges with the scripted policy.
+    config.game.shuffle_seed = 0;
     let mut manual = Match::new(config.clone(), true);
     let mut actions = Vec::new();
     let mut saw_exchange = false;
