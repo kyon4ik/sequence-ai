@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sequence Replay Viewer</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div><h1>Sequence Replay Viewer</h1><p id="run-name"></p></div>
+      <p id="matchup"></p>
+    </div>
+  </header>
+  <main class="workspace">
+    <section class="panel catalog" aria-labelledby="games-heading">
+      <h2 id="games-heading">Games</h2>
+      <div class="filters">
+        <label>Perspective <select id="perspective"></select></label>
+        <label>Move order
+          <select id="move-order">
+            <option value="all">Either order</option>
+            <option value="first">Moves first</option>
+            <option value="second">Moves second</option>
+          </select>
+        </label>
+        <label>Game ID or shuffle seed <input id="search" type="search" inputmode="numeric" autocomplete="off"></label>
+        <label>Sort by
+          <select id="sort">
+            <option value="id">Game ID</option>
+            <option value="shortest">Shortest first</option>
+            <option value="longest">Longest first</option>
+          </select>
+        </label>
+      </div>
+      <div id="outcomes" class="outcomes" role="group" aria-label="Filter by result"></div>
+      <div class="games-table" tabindex="0" role="region" aria-label="Matching games">
+        <table>
+          <thead><tr><th scope="col">Game</th><th scope="col">Result</th><th scope="col">Order</th><th scope="col">Actions</th></tr></thead>
+          <tbody id="game-rows"></tbody>
+        </table>
+      </div>
+      <p id="result-count" class="result-count" role="status">Loading games…</p>
+      <div id="pages" class="step-buttons" hidden>
+        <button id="previous-page" type="button">Previous page</button>
+        <button id="next-page" type="button">Next page</button>
+      </div>
+    </section>
+
+    <section class="panel replay" aria-label="Replay">
+      <div id="replay-message" class="replay-message" role="status">Select a game to open its replay.</div>
+      <div id="replay-content" hidden>
+        <header class="replay-header">
+          <div>
+            <div class="game-heading"><h2 id="game-title"></h2><span id="game-result"></span></div>
+            <p id="game-details"></p>
+          </div>
+          <button id="paired" type="button">Open swapped-seat game</button>
+        </header>
+        <div class="replay-layout">
+          <div class="position">
+            <div id="players" class="players" aria-label="Players"></div>
+            <div id="board" class="board" aria-label="Sequence board"></div>
+            <div class="hands-heading">
+              <h3>Hands</h3>
+              <label class="reveal"><input id="reveal" type="checkbox"> Show both hands</label>
+            </div>
+            <div id="hands"></div>
+            <p id="card-status" class="card-status" role="status"></p>
+          </div>
+          <section class="timeline" aria-labelledby="timeline-heading">
+            <h3 id="timeline-heading">Timeline</h3>
+            <p id="position-label" class="position-label"></p>
+            <p id="decision" class="decision"></p>
+            <div class="step-buttons">
+              <button id="previous" type="button">Previous</button>
+              <button id="next" type="button">Next</button>
+            </div>
+            <input id="scrubber" type="range" min="0" value="0" aria-label="Replay position">
+            <ol id="actions" class="actions" aria-label="Recorded actions"></ol>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

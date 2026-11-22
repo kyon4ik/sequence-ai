@@ -1,8 +1,10 @@
-use std::{fmt, fs, num::NonZeroUsize, path::Path};
+use std::{fmt, num::NonZeroUsize, path::Path};
 
 use sequence_agents::{HeuristicAgent, Policy, RandomAgent};
 use sequence_game::{Action, GameConfig, Outcome, Player, PlayerView};
-use sequence_match::{EvaluationConfig, EvaluationReport, Match, MatchConfig, MatchEnd, evaluate};
+use sequence_match::{
+    EvaluationConfig, EvaluationReport, Match, MatchConfig, MatchEnd, Replay, evaluate,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
@@ -14,7 +16,7 @@ pub struct ExperimentConfig {
     first_shuffle_seed: u64,
     deal_count: NonZeroUsize,
     policy_seed: u64,
-    starting_seat: Seat,
+    pub starting_seat: Seat,
     action_limit: NonZeroUsize,
     pub bootstrap: BootstrapConfig,
 }
@@ -90,7 +92,7 @@ impl Policy for Agent {
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum Seat {
+pub enum Seat {
     One,
     Two,
 }
@@ -106,7 +108,7 @@ impl From<Seat> for Player {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum GameEnd {
+pub enum GameEnd {
     PlayerOneWin,
     PlayerTwoWin,
     Draw,
@@ -125,17 +127,17 @@ impl From<MatchEnd> for GameEnd {
 }
 
 #[derive(Deserialize, Serialize)]
-struct GameRow {
-    game_id: usize,
-    pair_id: usize,
-    shuffle_seed: u64,
-    policy_a_seat: Seat,
+pub struct GameRow {
+    pub game_id: usize,
+    pub pair_id: usize,
+    pub shuffle_seed: u64,
+    pub policy_a_seat: Seat,
     player_one_policy: AgentKind,
     player_two_policy: AgentKind,
     player_one_seed: u64,
     player_two_seed: u64,
-    outcome: GameEnd,
-    actions: usize,
+    pub outcome: GameEnd,
+    pub actions: usize,
 }
 
 pub fn write_games(
@@ -174,74 +176,37 @@ pub fn write_games(
     Ok(())
 }
 
-pub fn inspect_game(directory: &Path, game_id: usize, action: Option<usize>) -> Result<()> {
-    let config: ExperimentConfig =
-        serde_json::from_reader(fs::File::open(directory.join("config.json"))?)?;
-    let mut reader = csv::Reader::from_path(directory.join("games.csv"))?;
-    let mut selected = None;
-    for row in reader.deserialize::<GameRow>() {
-        let row = row?;
-        if row.game_id == game_id {
-            selected = Some(row);
-            break;
-        }
-    }
-
-    let row = selected.ok_or_else(|| format!("game {game_id} does not exist"))?;
-    if let Some(number) = action
-        && number > row.actions
-    {
-        return Err(format!("game {game_id} has {} actions", row.actions).into());
-    }
-    let mut player_one = row.player_one_policy.build(row.player_one_seed);
-    let mut player_two = row.player_two_policy.build(row.player_two_seed);
-    let mut game = Match::new(
-        MatchConfig {
-            game: GameConfig {
-                shuffle_seed: row.shuffle_seed,
-                starting_player: config.starting_seat.into(),
-                policies: [
-                    row.player_one_policy.to_string(),
-                    row.player_two_policy.to_string(),
-                ],
+impl GameRow {
+    pub fn reconstruct(&self, config: &ExperimentConfig) -> Result<Replay> {
+        let mut player_one = self.player_one_policy.build(self.player_one_seed);
+        let mut player_two = self.player_two_policy.build(self.player_two_seed);
+        let mut game = Match::new(
+            MatchConfig {
+                game: GameConfig {
+                    shuffle_seed: self.shuffle_seed,
+                    starting_player: config.starting_seat.into(),
+                    policies: [
+                        self.player_one_policy.to_string(),
+                        self.player_two_policy.to_string(),
+                    ],
+                },
+                policy_seeds: [Some(self.player_one_seed), Some(self.player_two_seed)],
+                action_limit: config.action_limit,
             },
-            policy_seeds: [Some(row.player_one_seed), Some(row.player_two_seed)],
-            action_limit: config.action_limit,
-        },
-        true,
-    );
-    let end = game.run([&mut player_one, &mut player_two], |_, _| {})?;
-    if GameEnd::from(end) != row.outcome || game.action_count() != row.actions {
-        return Err(
-            "the reconstructed game differs from games.csv; use the original checkout".into(),
+            true,
         );
-    }
-
-    let replay = game
-        .into_report()
-        .and_then(|report| report.replay)
-        .expect("capture is enabled");
-    let mut actions = replay.actions.iter().enumerate();
-    replay.play(|_, game| {
-        if let Some((index, next)) = actions.next()
-            && action.is_none_or(|number| number == index + 1)
-        {
-            let view = game.game().view(next.player);
-            println!(
-                "\nAction {} | {:?} ({})\nBoard {:?}\nHand {:?}\nLegal {:?}\nChosen {:?}",
-                index + 1,
-                next.player,
-                replay.config.game.policies[next.player.index()],
-                view.board,
-                view.hand,
-                view.legal_actions,
-                next.action
-            );
+        let end = game.run([&mut player_one, &mut player_two], |_, _| {})?;
+        if GameEnd::from(end) != self.outcome || game.action_count() != self.actions {
+            return Err(format!(
+                "reconstructed game {} differs from games.csv. Use the original checkout.",
+                self.game_id
+            )
+            .into());
         }
-    })?;
-    println!(
-        "Game {game_id} | {:?} | {} actions",
-        row.outcome, row.actions
-    );
-    Ok(())
+
+        Ok(game
+            .into_report()
+            .and_then(|report| report.replay)
+            .expect("capture is enabled"))
+    }
 }

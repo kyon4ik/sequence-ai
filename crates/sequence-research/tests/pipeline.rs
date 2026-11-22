@@ -1,4 +1,10 @@
-use std::{fs, process::Command};
+use std::{
+    fs,
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpStream,
+    process::{Child, Command, Stdio},
+    time::Duration,
+};
 
 #[test]
 fn config_reproduces_all_artifacts_when_both_policies_reach_the_limit() {
@@ -59,18 +65,89 @@ fn config_reproduces_all_artifacts_when_both_policies_reach_the_limit() {
     );
     assert!(summary["paired_ci_95"].is_null());
 
-    let inspection = Command::new(executable)
-        .arg("inspect")
-        .arg(&first)
-        .args(["2", "--action", "1"])
-        .output()
-        .unwrap();
-    assert!(
-        inspection.status.success(),
-        "{}",
-        String::from_utf8_lossy(&inspection.stderr)
+    let mut inspection = Viewer(
+        Command::new(executable)
+            .arg("inspect")
+            .arg(&first)
+            .args(["2", "--action", "1", "--no-open"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
     );
-    let trace = String::from_utf8(inspection.stdout).unwrap();
-    assert!(trace.contains("Action 1 | Two (random)"));
-    assert!(trace.contains("Game 2 | ActionLimit | 1 actions"));
+    let mut address = String::new();
+    BufReader::new(inspection.0.stdout.take().unwrap())
+        .read_line(&mut address)
+        .unwrap();
+    let address = address
+        .strip_prefix("Replay viewer at http://")
+        .and_then(|url| url.trim_end().strip_suffix("/?game=2&action=1"))
+        .expect("the viewer should print its local address with the selected game and action");
+    assert!(get(address, "/?game=2&action=1").contains("Sequence Replay Viewer"));
+
+    let catalog = json_response(address, "/api/run");
+    assert_eq!(catalog["policies"], serde_json::json!(["random", "random"]));
+    assert_eq!(catalog["starting_seat"], 1);
+    let games = catalog["games"].as_array().unwrap();
+    assert_eq!(games.len(), 2);
+    assert_eq!(games[0]["policy_a_seat"], 0);
+    assert_eq!(games[1]["policy_a_seat"], 1);
+    assert_eq!(games[1]["shuffle_seed"], u64::MAX.to_string());
+    assert_eq!(games[1]["outcome"], "action_limit");
+
+    let replay = json_response(address, "/api/games/2");
+    let frames = replay["frames"].as_array().unwrap();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0]["active_player"], 1);
+    assert!(frames[1]["active_player"].is_null());
+    let action = &replay["actions"][0];
+    assert_eq!(action["player"], 1);
+    assert_eq!(action["kind"], "play");
+    assert!(
+        frames[0]["hands"][1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|card| {
+                card["card"] == action["card"]
+                    && card["targets"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&action["target"])
+            })
+    );
+    let target = action["target"].as_u64().unwrap() as usize;
+    assert!(frames[0]["chips"][target].is_null());
+    assert_eq!(frames[1]["chips"][target], 1);
+    assert!(get(address, "/api/games/3").starts_with("HTTP/1.1 404"));
+}
+
+struct Viewer(Child);
+
+impl Drop for Viewer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn get(address: &str, path: &str) -> String {
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+fn json_response(address: &str, path: &str) -> serde_json::Value {
+    let response = get(address, path);
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(headers.starts_with("HTTP/1.1 200"), "{response}");
+    serde_json::from_str(body).unwrap()
 }

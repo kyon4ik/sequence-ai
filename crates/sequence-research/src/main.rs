@@ -1,4 +1,5 @@
 mod experiment;
+mod inspect;
 mod plots;
 mod summary;
 
@@ -12,7 +13,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 
-use experiment::{ExperimentConfig, inspect_game, write_games};
+use experiment::{ExperimentConfig, write_games};
 use summary::Summary;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -45,15 +46,18 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Reconstruct a game from a run and print the acting player's view
+    /// Open a local browser to filter and replay games from a run
     Inspect {
         /// Directory produced by the run command
         run: PathBuf,
-        /// Game ID from games.csv
-        game_id: NonZeroUsize,
-        /// Show only this action number (counting from 1)
-        #[arg(long)]
+        /// Optionally open a game directly by ID from games.csv
+        game_id: Option<NonZeroUsize>,
+        /// Start just before this action (counting from 1)
+        #[arg(long, requires = "game_id")]
         action: Option<NonZeroUsize>,
+        /// Print the local address without opening a browser
+        #[arg(long)]
+        no_open: bool,
     },
 }
 
@@ -64,7 +68,13 @@ fn main() -> ExitCode {
             run,
             game_id,
             action,
-        } => inspect_game(&run, game_id.get(), action.map(NonZeroUsize::get)),
+            no_open,
+        } => inspect::serve(
+            &run,
+            game_id.map(NonZeroUsize::get),
+            action.map(NonZeroUsize::get),
+            no_open,
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

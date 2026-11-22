@@ -110,6 +110,14 @@ impl Board {
         }
     }
 
+    pub fn is_dead_card(&self, card: Card) -> bool {
+        Self::matching_positions(card).is_some_and(|positions| {
+            positions
+                .iter()
+                .all(|&position| self.chip(position).is_some())
+        })
+    }
+
     pub(crate) fn matching_positions(card: Card) -> Option<&'static [Position; 2]> {
         card.label_index().map(|index| &CARD_POSITIONS[index])
     }

@@ -260,11 +260,7 @@ impl Game {
     fn exchange_available(&self, card: Card) -> bool {
         !self.exchanged_this_turn
             && (!self.draw_pile.is_empty() || self.discards.iter().any(|pile| !pile.is_empty()))
-            && Board::matching_positions(card).is_some_and(|positions| {
-                positions
-                    .iter()
-                    .all(|&position| self.board.chip(position).is_some())
-            })
+            && self.board.is_dead_card(card)
     }
 
     fn play_targets(&self, card: Card) -> impl Iterator<Item = Position> + '_ {
