@@ -6,16 +6,7 @@ use serde_json::{Value, json};
 fn trains_and_evaluates_a_checkpoint_against_both_baselines() {
     let workspace = tempfile::tempdir().unwrap();
     let config_path = workspace.path().join("dqn.json");
-    let mut config: Value =
-        serde_json::from_str(include_str!("../../../experiments/dqn.json")).unwrap();
-    config["episodes"] = json!(1);
-    config["action_limit"] = json!(8);
-    config["batch_size"] = json!(2);
-    config["replay_warmup"] = json!(2);
-    config["train_every"] = json!(1);
-    config["target_update_every"] = json!(1);
-    config["evaluation"]["deal_count"] = json!(1);
-    fs::write(&config_path, config.to_string()).unwrap();
+    fs::write(&config_path, include_str!("fixtures/dqn.json")).unwrap();
 
     let directory = workspace.path().join("run");
     let executable = env!("CARGO_BIN_EXE_sequence-research");

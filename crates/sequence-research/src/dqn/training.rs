@@ -529,9 +529,10 @@ mod tests {
 
     #[test]
     fn replay_curriculum_widens_existing_tails_then_uses_all_decisions() {
-        let config: Config =
-            serde_json::from_str(include_str!("../../../../experiments/dqn-curriculum.json"))
-                .unwrap();
+        let config: Config = serde_json::from_str(include_str!(
+            "../../../../experiments/archive/dqn-curriculum.json"
+        ))
+        .unwrap();
         let device = Device::flex();
         let mut trainer = Trainer::new(&config, &device);
 
