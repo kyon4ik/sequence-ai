@@ -10,6 +10,7 @@ use burn::{
 };
 use rand::{Rng, SeedableRng, seq::index};
 use rand_chacha::ChaCha8Rng;
+use sequence_agents::{HeuristicAgent, Policy};
 use sequence_game::{Action, GameConfig, Outcome, Player};
 use sequence_match::{Match, MatchConfig, MatchEnd};
 use serde::Serialize;
@@ -17,7 +18,7 @@ use serde::Serialize;
 use crate::{Result, experiment::GameEnd};
 
 use super::{
-    Config,
+    Config, Target,
     model::Network,
     observation::{ACTIONS, Observation, action_index, legal_mask},
 };
@@ -68,7 +69,7 @@ pub struct Episode {
     episode: usize,
     shuffle_seed: u64,
     learner_seat: usize,
-    opponent_episode: usize,
+    opponent_episode: Option<usize>,
     outcome: GameEnd,
     actions: usize,
     decisions: usize,
@@ -77,6 +78,8 @@ pub struct Episode {
     reward: Option<f32>,
     replay_depth: Option<usize>,
     replay_eligible: usize,
+    opponent: &'static str,
+    opponent_seed: Option<u64>,
 }
 
 pub struct Learner {
@@ -95,6 +98,8 @@ pub struct Trainer<'a> {
     replay: VecDeque<Experience>,
     exploration: ChaCha8Rng,
     sampling: ChaCha8Rng,
+    opponent_rng: ChaCha8Rng,
+    heuristic_slot: usize,
     opponent_episode: usize,
     pub decisions: usize,
     replay_insertions: usize,
@@ -108,6 +113,8 @@ impl<'a> Trainer<'a> {
         let online = Network::new(&training_device);
         let mut sampling = ChaCha8Rng::seed_from_u64(config.seed);
         sampling.set_stream(1);
+        let mut opponent_rng = ChaCha8Rng::seed_from_u64(config.seed);
+        opponent_rng.set_stream(2);
 
         Self {
             config,
@@ -123,6 +130,8 @@ impl<'a> Trainer<'a> {
             replay: VecDeque::with_capacity(config.replay_capacity.get()),
             exploration: ChaCha8Rng::seed_from_u64(config.seed),
             sampling,
+            opponent_rng,
+            heuristic_slot: 0,
             opponent_episode: 0,
             decisions: 0,
             replay_insertions: 0,
@@ -137,9 +146,28 @@ impl<'a> Trainer<'a> {
             Player::One
         };
         let shuffle_seed = self.config.first_shuffle_seed + (episode - 1) as u64;
-        let mut policies = ["dqn".into(), format!("dqn@{}", self.opponent_episode)];
+        let opponent_seed = self.config.heuristic_opponent_every.and_then(|interval| {
+            let slot = (episode - 1) % interval.get();
+            if slot == 0 {
+                self.heuristic_slot = self.opponent_rng.random_range(0..interval.get());
+            }
+            (slot == self.heuristic_slot).then(|| self.opponent_rng.random())
+        });
+        let mut heuristic = opponent_seed.map(HeuristicAgent::new);
+        let (opponent, opponent_episode, opponent_id) = if heuristic.is_some() {
+            ("heuristic", None, "heuristic".into())
+        } else {
+            (
+                "self_play",
+                Some(self.opponent_episode),
+                format!("dqn@{}", self.opponent_episode),
+            )
+        };
+        let mut policies = ["dqn".into(), opponent_id];
+        let mut policy_seeds = [None, opponent_seed];
         if learner == Player::Two {
             policies.swap(0, 1);
+            policy_seeds.swap(0, 1);
         }
         let mut game = Match::new(
             MatchConfig {
@@ -149,7 +177,7 @@ impl<'a> Trainer<'a> {
                     policies,
                 },
                 action_limit: self.config.action_limit,
-                policy_seeds: [None, None],
+                policy_seeds,
             },
             false,
         );
@@ -162,8 +190,15 @@ impl<'a> Trainer<'a> {
             let action = if view.legal_actions == [Action::Pass] {
                 Action::Pass
             } else if actor != learner {
-                self.opponent
-                    .greedy_action(&view, &Observation::new(&view), self.device)
+                match &mut heuristic {
+                    Some(policy) => policy
+                        .choose_action(&view)
+                        .ok_or("heuristic did not choose an action in an active match")?,
+                    None => {
+                        self.opponent
+                            .greedy_action(&view, &Observation::new(&view), self.device)
+                    }
+                }
             } else {
                 let own_sequences = view.claimed_sequences[learner.index()].len() as f32;
                 let opponent_sequences =
@@ -244,7 +279,7 @@ impl<'a> Trainer<'a> {
             episode,
             shuffle_seed,
             learner_seat: learner.index() + 1,
-            opponent_episode: self.opponent_episode,
+            opponent_episode,
             outcome: end.into(),
             actions: game.action_count(),
             decisions: self.decisions,
@@ -258,6 +293,8 @@ impl<'a> Trainer<'a> {
                     .filter(|experience| experience.is_within_depth(depth))
                     .count()
             }),
+            opponent,
+            opponent_seed,
         };
         if episode.is_multiple_of(self.config.opponent_update_every.get()) {
             self.opponent = self.learner.online.valid();
@@ -325,7 +362,7 @@ impl<'a> Trainer<'a> {
             self.device,
             &self.training_device,
             &batch,
-            false,
+            self.config.target,
         )
     }
 }
@@ -337,7 +374,7 @@ impl Learner {
         device: &Device,
         training_device: &Device,
         batch: &[&Experience],
-        double: bool,
+        target: Target,
     ) -> Result<()> {
         let size = batch.len();
         let mut legal = Vec::with_capacity(size * ACTIONS);
@@ -365,7 +402,10 @@ impl Learner {
         let legal = Tensor::from_data(TensorData::new(legal, [size, ACTIONS]), device);
         let terminals = Tensor::from_data(TensorData::new(terminals, [size, 1]), device);
         let rewards = Tensor::from_data(TensorData::new(rewards, [size, 1]), device);
-        let selector = double.then(|| self.online.valid().forward(next_states(), device));
+        let selector = match target {
+            Target::Dqn => None,
+            Target::DoubleDqn => Some(self.online.valid().forward(next_states(), device)),
+        };
         let targets = bellman_targets(
             next_scores,
             selector,
@@ -430,6 +470,35 @@ fn bellman_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_opponents_schedule_one_seeded_heuristic_per_block() {
+        let mut config: Config = serde_json::from_str(include_str!(
+            "../../../../experiments/double-dqn-mixed-full.json"
+        ))
+        .unwrap();
+        config.validate().unwrap();
+        config.action_limit = 8.try_into().unwrap();
+        let device = Device::flex();
+        let mut trainer = Trainer::new(&config, &device);
+
+        for block in 0..2 {
+            let mut heuristic_games = 0;
+            for episode in (block * 5 + 1)..=(block * 5 + 5) {
+                let row = trainer.play_episode(episode).unwrap();
+                if row.opponent == "heuristic" {
+                    heuristic_games += 1;
+                    assert!(row.opponent_seed.is_some());
+                    assert!(row.opponent_episode.is_none());
+                } else {
+                    assert_eq!(row.opponent, "self_play");
+                    assert_eq!(row.opponent_episode, Some(0));
+                    assert!(row.opponent_seed.is_none());
+                }
+            }
+            assert_eq!(heuristic_games, 1);
+        }
+    }
 
     #[test]
     fn sequence_shaping_preserves_the_completed_discounted_return() {

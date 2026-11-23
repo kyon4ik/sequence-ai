@@ -42,10 +42,20 @@ impl Backend {
     }
 }
 
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Target {
+    #[default]
+    Dqn,
+    DoubleDqn,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
     device: Backend,
+    #[serde(default)]
+    target: Target,
     seed: u64,
     first_shuffle_seed: u64,
     episodes: NonZeroUsize,
@@ -61,6 +71,8 @@ struct Config {
     train_every: NonZeroUsize,
     target_update_every: NonZeroUsize,
     opponent_update_every: NonZeroUsize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    heuristic_opponent_every: Option<NonZeroUsize>,
     checkpoint_every: NonZeroUsize,
     #[serde(default)]
     sequence_shaping_weight: f32,

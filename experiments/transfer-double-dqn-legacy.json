@@ -1,0 +1,25 @@
+{
+  "device": "cuda",
+  "seed": 42,
+  "first_shuffle_seed": 0,
+  "episodes": 450,
+  "action_limit": 512,
+  "gamma": 0.99,
+  "learning_rate": 0.0001,
+  "epsilon_start": 1.0,
+  "epsilon_end": 0.05,
+  "epsilon_decay_decisions": 14000,
+  "batch_size": 128,
+  "replay_capacity": 20000,
+  "replay_warmup": 1024,
+  "train_every": 4,
+  "target_update_every": 1000,
+  "opponent_update_every": 100,
+  "checkpoint_every": 150,
+  "evaluation": {
+    "first_shuffle_seed": 1000000,
+    "deal_count": 32,
+    "policy_seed": 2026
+  },
+  "target": "double_dqn"
+}

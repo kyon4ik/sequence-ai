@@ -46,7 +46,7 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Train DQN in self-play and evaluate checkpoints against Random and Heuristic
+    /// Train DQN or Double DQN in self-play and evaluate checkpoints against Random and Heuristic
     TrainDqn {
         /// JSON training experiment config
         config: PathBuf,

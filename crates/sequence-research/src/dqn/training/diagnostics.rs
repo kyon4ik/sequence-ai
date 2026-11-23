@@ -13,7 +13,7 @@ use win_replay::WinReplay;
 
 use super::{Experience, Learner, Trainer};
 use crate::dqn::{Backend, EvaluationOptions, evaluate};
-use crate::dqn::{Config, model::Network, observation::ACTIONS};
+use crate::dqn::{Config, Target, model::Network, observation::ACTIONS};
 use crate::{Result, experiment::GameEnd};
 use burn::{module::Module, optim::AdamConfig, tensor::Device};
 use serde::Serialize;
@@ -139,9 +139,13 @@ fn fixed_batch(config: &Config, device: &Device, directory: &Path) -> Result<()>
     let before = selected_values(&trainer.learner.online.valid(), device, &examples)?;
     let batch = examples.iter().collect::<Vec<_>>();
     for _ in 0..200 {
-        trainer
-            .learner
-            .update_batch(config, device, &trainer.training_device, &batch, false)?;
+        trainer.learner.update_batch(
+            config,
+            device,
+            &trainer.training_device,
+            &batch,
+            Target::Dqn,
+        )?;
     }
     let after = selected_values(&trainer.learner.online.valid(), device, &examples)?;
     let tmp = tempfile::tempdir_in(directory)?;
@@ -173,6 +177,7 @@ fn fixed_batch(config: &Config, device: &Device, directory: &Path) -> Result<()>
 
 pub fn run(options: Options) -> Result<()> {
     let mut config = Config::read(&options.config, options.device)?;
+    config.target = Target::Dqn;
     if let Some(seed) = options.seed {
         config.seed = seed;
     }
@@ -221,7 +226,7 @@ pub fn run(options: Options) -> Result<()> {
                         &device,
                         &trainer.training_device,
                         &batch.iter().collect::<Vec<_>>(),
-                        true,
+                        Target::DoubleDqn,
                     )?;
                 }
                 Ok(())
