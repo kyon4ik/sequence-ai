@@ -1,8 +1,10 @@
-use std::{fs, path::Path};
+use std::{cell::Cell, fs, path::Path};
 
 use burn::tensor::Device;
+use clap::Args;
 use plotters::prelude::*;
-use sequence_game::Player;
+use sequence_agents::Policy;
+use sequence_game::{Action, Player, PlayerView};
 use sequence_match::{EvaluationConfig, evaluate as evaluate_matches};
 use serde::Serialize;
 
@@ -13,6 +15,75 @@ use super::{
     model::{GreedyPolicy, Network, ParameterCounts},
 };
 
+#[derive(Args, Clone, Copy, Default)]
+pub struct Options {
+    /// Count turns with a legal first-sequence or immediate winning move and how often it is taken
+    #[arg(long)]
+    tactics: bool,
+    /// Take an immediate win when available and report tactical counts
+    #[arg(long)]
+    take_immediate_wins: bool,
+}
+
+#[derive(Clone, Copy, Default, Serialize)]
+struct Tactics {
+    take_immediate_wins: bool,
+    first_sequence_opportunities: usize,
+    first_sequences_taken: usize,
+    immediate_win_opportunities: usize,
+    immediate_wins_taken: usize,
+}
+
+struct EvaluationPolicy<'a> {
+    greedy: GreedyPolicy<'a>,
+    tactics: Option<&'a Cell<Tactics>>,
+}
+
+impl Policy for EvaluationPolicy<'_> {
+    fn choose_action(&mut self, view: &PlayerView<'_>) -> Option<Action> {
+        let mut selected = self.greedy.choose_action(view)?;
+        let Some(tactics) = self.tactics else {
+            return Some(selected);
+        };
+
+        let mut counts = tactics.get();
+        let needs_first_sequence = view.claimed_sequences[view.player.index()].is_empty();
+        let mut first_sequence_available = false;
+        let mut first_sequence_taken = false;
+        let mut winning_move = None;
+        let mut immediate_win_taken = false;
+
+        for &action in &view.legal_actions {
+            let Some(preview) = view.preview_play(action) else {
+                continue;
+            };
+            if needs_first_sequence && !preview.new_claims.is_empty() {
+                first_sequence_available = true;
+                first_sequence_taken |= action == selected;
+            }
+            if preview.wins {
+                winning_move.get_or_insert(action);
+                immediate_win_taken |= action == selected;
+            }
+        }
+
+        if counts.take_immediate_wins
+            && let Some(action) = winning_move
+        {
+            selected = action;
+            immediate_win_taken = true;
+            first_sequence_taken = needs_first_sequence;
+        }
+
+        counts.first_sequence_opportunities += usize::from(first_sequence_available);
+        counts.first_sequences_taken += usize::from(first_sequence_taken);
+        counts.immediate_win_opportunities += usize::from(winning_move.is_some());
+        counts.immediate_wins_taken += usize::from(immediate_win_taken);
+        tactics.set(counts);
+        Some(selected)
+    }
+}
+
 #[derive(Clone, Copy, Serialize)]
 pub struct Totals {
     pub opponent: AgentKind,
@@ -21,6 +92,8 @@ pub struct Totals {
     pub losses: usize,
     pub cutoffs: usize,
     pub win_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tactics: Option<Tactics>,
 }
 
 #[derive(Serialize)]
@@ -42,7 +115,12 @@ struct Summary<'a> {
     latest_evaluation: &'a [Checkpoint],
 }
 
-pub fn evaluate(network: &Network, device: &Device, config: &Config) -> Result<[Totals; 2]> {
+pub fn evaluate(
+    network: &Network,
+    device: &Device,
+    config: &Config,
+    options: Options,
+) -> Result<[Totals; 2]> {
     let settings = &config.evaluation;
     let last = last_seed(settings.first_shuffle_seed, settings.deal_count)?;
     let mut evaluation = EvaluationConfig {
@@ -55,9 +133,18 @@ pub fn evaluate(network: &Network, device: &Device, config: &Config) -> Result<[
     };
     let mut versus = |opponent: AgentKind| -> Result<_> {
         evaluation.policy_ids[1] = opponent.to_string();
+        let tactics = (options.tactics || options.take_immediate_wins).then(|| {
+            Cell::new(Tactics {
+                take_immediate_wins: options.take_immediate_wins,
+                ..Tactics::default()
+            })
+        });
         let report = evaluate_matches(
             &evaluation,
-            |_| GreedyPolicy { network, device },
+            |_| EvaluationPolicy {
+                greedy: GreedyPolicy { network, device },
+                tactics: tactics.as_ref(),
+            },
             |seed| opponent.build(seed),
         )?;
         let [wins, losses] = report.totals.wins;
@@ -70,6 +157,7 @@ pub fn evaluate(network: &Network, device: &Device, config: &Config) -> Result<[
             losses,
             cutoffs: report.totals.truncations,
             win_rate: (completed > 0).then(|| wins as f64 / completed as f64),
+            tactics: tactics.map(Cell::into_inner),
         })
     };
     Ok([versus(AgentKind::Random)?, versus(AgentKind::Heuristic)?])

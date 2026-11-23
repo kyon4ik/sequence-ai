@@ -56,6 +56,9 @@ enum Command {
         /// Override the device specified in the config
         #[arg(long, value_enum)]
         device: Option<dqn::Backend>,
+        /// Override the model initialization, exploration, and replay RNG seed
+        #[arg(long)]
+        seed: Option<u64>,
     },
     /// Evaluate a saved DQN checkpoint on the config's held-out deals
     EvaluateDqn {
@@ -66,6 +69,8 @@ enum Command {
         /// Override the device specified in the config
         #[arg(long, value_enum)]
         device: Option<dqn::Backend>,
+        #[command(flatten)]
+        options: dqn::EvaluationOptions,
     },
     /// Open a local browser to filter and replay games from a run
     Inspect {
@@ -89,12 +94,14 @@ fn main() -> ExitCode {
             config,
             output,
             device,
-        } => dqn::train(&config, output, device),
+            seed,
+        } => dqn::train(&config, output, device, seed),
         Command::EvaluateDqn {
             checkpoint,
             config,
             device,
-        } => dqn::evaluate_checkpoint(&checkpoint, &config, device),
+            options,
+        } => dqn::evaluate_checkpoint(&checkpoint, &config, device, options),
         Command::Inspect {
             run,
             game_id,

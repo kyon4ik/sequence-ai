@@ -23,6 +23,7 @@ use super::{
 struct Decision {
     observation: Observation,
     legal: [bool; ACTIONS],
+    potential: f32,
 }
 
 struct Experience {
@@ -34,6 +35,24 @@ struct Experience {
 }
 
 impl Experience {
+    fn new(
+        state: Rc<Decision>,
+        action: usize,
+        reward: f32,
+        next: Option<Rc<Decision>>,
+        gamma: f32,
+    ) -> Self {
+        let next_potential = next.as_ref().map_or(0.0, |decision| decision.potential);
+        let reward = reward + (gamma * next_potential - state.potential);
+        Self {
+            state,
+            action,
+            reward,
+            decisions_to_end: next.is_none().then_some(1),
+            next,
+        }
+    }
+
     fn is_within_depth(&self, depth: usize) -> bool {
         self.decisions_to_end
             .is_some_and(|distance| distance <= depth)
@@ -134,19 +153,24 @@ impl<'a> Trainer<'a> {
                 self.opponent
                     .greedy_action(&view, &Observation::new(&view), self.device)
             } else {
+                let own_sequences = view.claimed_sequences[learner.index()].len() as f32;
+                let opponent_sequences =
+                    view.claimed_sequences[learner.opponent().index()].len() as f32;
                 let decision = Rc::new(Decision {
                     observation: Observation::new(&view),
                     legal: legal_mask(&view),
+                    potential: self.config.sequence_shaping_weight
+                        * (own_sequences - opponent_sequences),
                 });
                 if let Some((state, action)) = pending.take() {
                     self.record(
-                        Experience {
+                        Experience::new(
                             state,
                             action,
-                            reward: 0.0,
-                            next: Some(Rc::clone(&decision)),
-                            decisions_to_end: None,
-                        },
+                            0.0,
+                            Some(Rc::clone(&decision)),
+                            self.config.gamma,
+                        ),
                         replay_depth,
                     )?;
                 }
@@ -188,13 +212,7 @@ impl<'a> Trainer<'a> {
                 }
             }
             self.record(
-                Experience {
-                    state,
-                    action,
-                    reward,
-                    next: None,
-                    decisions_to_end: Some(1),
-                },
+                Experience::new(state, action, reward, None, self.config.gamma),
                 replay_depth,
             )?;
         }
@@ -346,6 +364,32 @@ fn bellman_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sequence_shaping_preserves_the_completed_discounted_return() {
+        let game = sequence_game::Game::new(GameConfig {
+            shuffle_seed: 0,
+            starting_player: Player::One,
+            policies: Default::default(),
+        });
+        let view = game.view(Player::One);
+        let decision = |potential| {
+            Rc::new(Decision {
+                observation: Observation::new(&view),
+                legal: legal_mask(&view),
+                potential,
+            })
+        };
+        let gamma = 0.99;
+        for outcome in [-1.0, 0.0, 1.0] {
+            let first = decision(0.1);
+            let claim = Experience::new(decision(0.0), 0, 0.0, Some(Rc::clone(&first)), gamma);
+            let finish = Experience::new(first, 0, outcome, None, gamma);
+            assert_eq!(claim.reward, gamma * 0.1);
+            assert_eq!(finish.reward, outcome - 0.1);
+            assert!((claim.reward + gamma * finish.reward - gamma * outcome).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn replay_curriculum_widens_existing_tails_then_uses_all_decisions() {

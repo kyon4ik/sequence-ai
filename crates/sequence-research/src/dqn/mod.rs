@@ -17,6 +17,8 @@ use crate::Result;
 
 use self::{evaluation::evaluate, model::Network, training::Trainer};
 
+pub use evaluation::Options as EvaluationOptions;
+
 #[derive(Clone, Copy, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
@@ -58,6 +60,8 @@ struct Config {
     target_update_every: NonZeroUsize,
     opponent_update_every: NonZeroUsize,
     checkpoint_every: NonZeroUsize,
+    #[serde(default)]
+    sequence_shaping_weight: f32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     replay_curriculum: Vec<ReplayStage>,
     evaluation: Evaluation,
@@ -96,6 +100,9 @@ impl Config {
         }
         if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
             return Err("learning_rate must be positive and finite".into());
+        }
+        if !self.sequence_shaping_weight.is_finite() || self.sequence_shaping_weight < 0.0 {
+            return Err("sequence_shaping_weight must be nonnegative and finite".into());
         }
         if !(0.0..=1.0).contains(&self.epsilon_start)
             || !(0.0..=self.epsilon_start).contains(&self.epsilon_end)
@@ -142,8 +149,16 @@ fn last_seed(first: u64, count: NonZeroUsize) -> Result<u64> {
         .ok_or_else(|| "shuffle seed range exceeds u64::MAX".into())
 }
 
-pub fn train(path: &Path, output: Option<PathBuf>, backend: Option<Backend>) -> Result<()> {
-    let config = Config::read(path, backend)?;
+pub fn train(
+    path: &Path,
+    output: Option<PathBuf>,
+    backend: Option<Backend>,
+    seed: Option<u64>,
+) -> Result<()> {
+    let mut config = Config::read(path, backend)?;
+    if let Some(seed) = seed {
+        config.seed = seed;
+    }
     let device = config.device.device()?;
     let output = match output {
         Some(path) => path,
@@ -171,7 +186,7 @@ pub fn train(path: &Path, output: Option<PathBuf>, backend: Option<Backend>) -> 
         trainer.online.valid().save_file(&path)?;
         let network = Network::load(&path, &device)?;
 
-        for totals in evaluate(&network, &device, &config)? {
+        for totals in evaluate(&network, &device, &config, EvaluationOptions::default())? {
             let row = evaluation::Checkpoint {
                 episode,
                 decisions: trainer.decisions,
@@ -208,11 +223,16 @@ pub fn train(path: &Path, output: Option<PathBuf>, backend: Option<Backend>) -> 
     Ok(())
 }
 
-pub fn evaluate_checkpoint(path: &Path, config: &Path, backend: Option<Backend>) -> Result<()> {
+pub fn evaluate_checkpoint(
+    path: &Path,
+    config: &Path,
+    backend: Option<Backend>,
+    options: EvaluationOptions,
+) -> Result<()> {
     let config = Config::read(config, backend)?;
     let device = config.device.device()?;
     let network = Network::load(path, &device)?;
-    let results = evaluate(&network, &device, &config)?;
+    let results = evaluate(&network, &device, &config, options)?;
     println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())
 }
