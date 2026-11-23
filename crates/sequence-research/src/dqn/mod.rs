@@ -53,6 +53,8 @@ enum Target {
 #[serde(deny_unknown_fields)]
 struct Config {
     device: Backend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inference_device: Option<Backend>,
     #[serde(default)]
     target: Target,
     seed: u64,
@@ -79,6 +81,7 @@ struct Config {
 #[derive(Deserialize)]
 struct SavedEvaluation {
     device: Backend,
+    inference_device: Option<Backend>,
     first_shuffle_seed: u64,
     episodes: NonZeroUsize,
     action_limit: NonZeroUsize,
@@ -154,6 +157,7 @@ pub fn train(
         config.seed = seed;
     }
     let device = config.device.device()?;
+    let inference_device = config.inference_device.unwrap_or(config.device).device()?;
     let output = match output {
         Some(path) => path,
         None => Path::new("results").join(path.file_stem().ok_or("expected a config filename")?),
@@ -173,16 +177,16 @@ pub fn train(
     let mut episodes = csv::Writer::from_path(output.join("training.csv"))?;
     let mut evaluations = csv::Writer::from_path(output.join("evaluation.csv"))?;
     let mut rows = Vec::new();
-    let mut trainer = Trainer::new(&config, &device);
+    let mut trainer = Trainer::new(&config, &device, &inference_device);
     let model = trainer.learner.online.parameter_counts();
     let mut checkpoint = |episode, trainer: &Trainer<'_>| -> Result<()> {
         let path = checkpoints.join(format!("episode-{episode:06}.bpk"));
         trainer.learner.online.valid().save_file(&path)?;
-        let network = Network::load(&path, &device)?;
+        let network = Network::load(&path, &inference_device)?;
 
         for totals in evaluate(
             &network,
-            &device,
+            &inference_device,
             &config.evaluation,
             config.action_limit,
             EvaluationOptions::default(),
@@ -233,7 +237,10 @@ pub fn evaluate_checkpoint(
     config
         .evaluation
         .validate_deals(config.first_shuffle_seed, config.episodes)?;
-    let device = backend.unwrap_or(config.device).device()?;
+    let device = backend
+        .or(config.inference_device)
+        .unwrap_or(config.device)
+        .device()?;
     let network = Network::load(path, &device)?;
     let results = evaluate(
         &network,

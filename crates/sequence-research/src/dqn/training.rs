@@ -9,7 +9,7 @@ use burn::{
 use rand::{Rng, SeedableRng, seq::index};
 use rand_chacha::ChaCha8Rng;
 use sequence_agents::{HeuristicAgent, Policy};
-use sequence_game::{Action, GameConfig, Outcome, Player};
+use sequence_game::{Action, GameConfig, Outcome, Player, PlayerView};
 use sequence_match::{Match, MatchConfig, MatchEnd};
 use serde::Serialize;
 
@@ -59,8 +59,10 @@ pub struct Learner {
 pub struct Trainer<'a> {
     config: &'a Config,
     device: &'a Device,
+    inference_device: &'a Device,
     training_device: Device,
     pub learner: Learner,
+    learner_policy: Option<Network>,
     opponent: Network,
     replay: VecDeque<Experience>,
     exploration: ChaCha8Rng,
@@ -73,7 +75,7 @@ pub struct Trainer<'a> {
 }
 
 impl<'a> Trainer<'a> {
-    pub fn new(config: &'a Config, device: &'a Device) -> Self {
+    pub fn new(config: &'a Config, device: &'a Device, inference_device: &'a Device) -> Self {
         device.seed(config.seed);
         let training_device = device.clone().autodiff();
         let online = Network::new(&training_device);
@@ -85,8 +87,10 @@ impl<'a> Trainer<'a> {
         Self {
             config,
             device,
+            inference_device,
             training_device,
-            opponent: online.valid(),
+            opponent: online.valid().to_device(inference_device),
+            learner_policy: None,
             learner: Learner {
                 target: online.valid(),
                 online,
@@ -157,10 +161,11 @@ impl<'a> Trainer<'a> {
                     Some(policy) => policy
                         .choose_action(&view)
                         .ok_or("heuristic did not choose an action in an active match")?,
-                    None => {
-                        self.opponent
-                            .greedy_action(&view, &Observation::new(&view), self.device)
-                    }
+                    None => self.opponent.greedy_action(
+                        &view,
+                        &Observation::new(&view),
+                        self.inference_device,
+                    ),
                 }
             } else {
                 let decision = Rc::new(Decision {
@@ -179,11 +184,7 @@ impl<'a> Trainer<'a> {
                 let action = if self.exploration.random::<f64>() < self.epsilon() {
                     view.legal_actions[self.exploration.random_range(0..view.legal_actions.len())]
                 } else {
-                    self.learner.online.valid().greedy_action(
-                        &view,
-                        &decision.observation,
-                        self.device,
-                    )
+                    self.greedy_learner_action(&view, &decision.observation)
                 };
                 pending = Some((decision, action_index(action).expect("scored action")));
                 self.decisions += 1;
@@ -223,10 +224,30 @@ impl<'a> Trainer<'a> {
             opponent_seed,
         };
         if episode.is_multiple_of(self.config.opponent_update_every.get()) {
-            self.opponent = self.learner.online.valid();
+            self.opponent = self.learner.online.valid().to_device(self.inference_device);
             self.opponent_episode = episode;
         }
         Ok(row)
+    }
+
+    fn greedy_learner_action(
+        &mut self,
+        view: &PlayerView<'_>,
+        observation: &Observation,
+    ) -> Action {
+        if self.device == self.inference_device {
+            return self
+                .learner
+                .online
+                .valid()
+                .greedy_action(view, observation, self.device);
+        }
+
+        // Copy the updated weights only when the learner next needs a greedy action.
+        let policy = self
+            .learner_policy
+            .get_or_insert_with(|| self.learner.online.valid().to_device(self.inference_device));
+        policy.greedy_action(view, observation, self.inference_device)
     }
 
     fn epsilon(&self) -> f64 {
@@ -262,7 +283,9 @@ impl<'a> Trainer<'a> {
         .map(|index| &self.replay[index])
         .collect();
         self.learner
-            .update_batch(self.config, self.device, &self.training_device, &batch)
+            .update_batch(self.config, self.device, &self.training_device, &batch)?;
+        self.learner_policy = None;
+        Ok(())
     }
 }
 
@@ -378,7 +401,7 @@ mod tests {
         config.validate().unwrap();
         config.action_limit = 8.try_into().unwrap();
         let device = Device::flex();
-        let mut trainer = Trainer::new(&config, &device);
+        let mut trainer = Trainer::new(&config, &device, &device);
 
         for block in 0..2 {
             let mut heuristic_games = 0;

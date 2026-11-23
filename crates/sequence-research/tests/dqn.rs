@@ -55,7 +55,7 @@ fn trains_and_evaluates_a_checkpoint_against_both_baselines() {
     let evaluate = Command::new(executable)
         .arg("evaluate-dqn")
         .arg(directory.join("checkpoints/episode-000001.bpk"))
-        .arg(legacy_path)
+        .arg(&legacy_path)
         .output()
         .unwrap();
     assert!(
@@ -68,4 +68,20 @@ fn trains_and_evaluates_a_checkpoint_against_both_baselines() {
     assert_eq!(results[1]["opponent"], "heuristic");
     assert_eq!(results[0]["cutoffs"], 2);
     assert_eq!(results[1]["cutoffs"], 2);
+
+    legacy_config["device"] = json!("cuda");
+    legacy_config["inference_device"] = json!("cpu");
+    fs::write(&legacy_path, legacy_config.to_string()).unwrap();
+    let evaluate_on_cpu = Command::new(executable)
+        .arg("evaluate-dqn")
+        .arg(directory.join("checkpoints/episode-000001.bpk"))
+        .arg(&legacy_path)
+        .output()
+        .unwrap();
+    assert!(
+        evaluate_on_cpu.status.success(),
+        "{}",
+        String::from_utf8_lossy(&evaluate_on_cpu.stderr)
+    );
+    assert_eq!(evaluate_on_cpu.stdout, evaluate.stdout);
 }

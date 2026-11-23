@@ -48,12 +48,12 @@ enum Command {
     },
     /// Train DQN or Double DQN and evaluate checkpoints against Random and Heuristic
     TrainDqn {
-        /// JSON training experiment config
+        /// JSON experiment config with a training device and optional inference_device for play and evaluation
         config: PathBuf,
         /// New output directory (defaults to results/<config file stem>)
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Override the device specified in the config
+        /// Override the training device specified in the config
         #[arg(long, value_enum)]
         device: Option<dqn::Backend>,
         /// Override the model initialization, exploration, and replay RNG seed
@@ -66,7 +66,7 @@ enum Command {
         checkpoint: PathBuf,
         /// JSON training experiment config
         config: PathBuf,
-        /// Override the device specified in the config
+        /// Override the evaluation device specified in the config
         #[arg(long, value_enum)]
         device: Option<dqn::Backend>,
         #[command(flatten)]

@@ -1,5 +1,6 @@
 {
   "device": "cuda",
+  "inference_device": "cpu",
   "target": "double_dqn",
   "seed": 42,
   "first_shuffle_seed": 0,
