@@ -1,3 +1,4 @@
+mod dqn;
 mod experiment;
 mod inspect;
 mod plots;
@@ -45,6 +46,27 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Train DQN in self-play and evaluate checkpoints against Random and Heuristic
+    TrainDqn {
+        /// JSON training experiment config
+        config: PathBuf,
+        /// New output directory (defaults to results/<config file stem>)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Override the device specified in the config
+        #[arg(long, value_enum)]
+        device: Option<dqn::Backend>,
+    },
+    /// Evaluate a saved DQN checkpoint on the config's held-out deals
+    EvaluateDqn {
+        /// Saved .bpk checkpoint
+        checkpoint: PathBuf,
+        /// JSON training experiment config
+        config: PathBuf,
+        /// Override the device specified in the config
+        #[arg(long, value_enum)]
+        device: Option<dqn::Backend>,
+    },
     /// Open a local browser to filter and replay games from a run
     Inspect {
         /// Directory produced by the run command
@@ -63,6 +85,16 @@ enum Command {
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Run { config, output } => run(&config, output),
+        Command::TrainDqn {
+            config,
+            output,
+            device,
+        } => dqn::train(&config, output, device),
+        Command::EvaluateDqn {
+            checkpoint,
+            config,
+            device,
+        } => dqn::evaluate_checkpoint(&checkpoint, &config, device),
         Command::Inspect {
             run,
             game_id,

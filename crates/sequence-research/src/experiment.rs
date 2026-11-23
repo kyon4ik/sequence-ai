@@ -44,7 +44,7 @@ impl ExperimentConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentKind {
     Random,
@@ -66,7 +66,7 @@ enum Agent {
 }
 
 impl AgentKind {
-    fn build(self, seed: u64) -> Agent {
+    pub(crate) fn build(self, seed: u64) -> impl Policy {
         match self {
             Self::Random => Agent::Random(RandomAgent::new(seed)),
             Self::Heuristic => Agent::Heuristic(HeuristicAgent::new(seed)),
