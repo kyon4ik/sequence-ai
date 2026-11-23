@@ -1,5 +1,3 @@
-pub mod diagnostics;
-
 use std::{collections::VecDeque, rc::Rc};
 
 use burn::{
@@ -26,42 +24,13 @@ use super::{
 struct Decision {
     observation: Observation,
     legal: [bool; ACTIONS],
-    potential: f32,
-    winning_actions: Vec<usize>,
 }
 
-#[derive(Clone)]
 struct Experience {
     state: Rc<Decision>,
     action: usize,
     reward: f32,
     next: Option<Rc<Decision>>,
-    decisions_to_end: Option<usize>,
-}
-
-impl Experience {
-    fn new(
-        state: Rc<Decision>,
-        action: usize,
-        reward: f32,
-        next: Option<Rc<Decision>>,
-        gamma: f32,
-    ) -> Self {
-        let next_potential = next.as_ref().map_or(0.0, |decision| decision.potential);
-        let reward = reward + (gamma * next_potential - state.potential);
-        Self {
-            state,
-            action,
-            reward,
-            decisions_to_end: next.is_none().then_some(1),
-            next,
-        }
-    }
-
-    fn is_within_depth(&self, depth: usize) -> bool {
-        self.decisions_to_end
-            .is_some_and(|distance| distance <= depth)
-    }
 }
 
 #[derive(Serialize)]
@@ -76,8 +45,6 @@ pub struct Episode {
     updates: usize,
     epsilon: f64,
     reward: Option<f32>,
-    replay_depth: Option<usize>,
-    replay_eligible: usize,
     opponent: &'static str,
     opponent_seed: Option<u64>,
 }
@@ -103,7 +70,6 @@ pub struct Trainer<'a> {
     opponent_episode: usize,
     pub decisions: usize,
     replay_insertions: usize,
-    trace: Option<diagnostics::Trace>,
 }
 
 impl<'a> Trainer<'a> {
@@ -135,7 +101,6 @@ impl<'a> Trainer<'a> {
             opponent_episode: 0,
             decisions: 0,
             replay_insertions: 0,
-            trace: None,
         }
     }
 
@@ -182,8 +147,6 @@ impl<'a> Trainer<'a> {
             false,
         );
 
-        let replay_depth = self.config.replay_depth(episode);
-        let decisions_before_episode = self.decisions;
         let mut pending = None;
         while let Some(view) = game.active_view() {
             let actor = view.player;
@@ -200,35 +163,17 @@ impl<'a> Trainer<'a> {
                     }
                 }
             } else {
-                let own_sequences = view.claimed_sequences[learner.index()].len() as f32;
-                let opponent_sequences =
-                    view.claimed_sequences[learner.opponent().index()].len() as f32;
                 let decision = Rc::new(Decision {
                     observation: Observation::new(&view),
                     legal: legal_mask(&view),
-                    winning_actions: if self.trace.is_some() {
-                        view.legal_actions
-                            .iter()
-                            .filter(|&&a| view.preview_play(a).is_some_and(|p| p.wins))
-                            .filter_map(|&a| action_index(a))
-                            .collect()
-                    } else {
-                        Vec::new()
-                    },
-                    potential: self.config.sequence_shaping_weight
-                        * (own_sequences - opponent_sequences),
                 });
                 if let Some((state, action)) = pending.take() {
-                    self.record(
-                        Experience::new(
-                            state,
-                            action,
-                            0.0,
-                            Some(Rc::clone(&decision)),
-                            self.config.gamma,
-                        ),
-                        replay_depth,
-                    )?;
+                    self.record(Experience {
+                        state,
+                        action,
+                        reward: 0.0,
+                        next: Some(Rc::clone(&decision)),
+                    })?;
                 }
 
                 let action = if self.exploration.random::<f64>() < self.epsilon() {
@@ -255,24 +200,12 @@ impl<'a> Trainer<'a> {
             MatchEnd::ActionLimit => None,
         };
         if let (Some((state, action)), Some(reward)) = (pending, reward) {
-            if replay_depth.is_some() {
-                // The terminal decision is still pending. All earlier decisions
-                // from this game form the newest suffix of replay.
-                let earlier_decisions = self.decisions - decisions_before_episode - 1;
-                for (index, experience) in self
-                    .replay
-                    .iter_mut()
-                    .rev()
-                    .take(earlier_decisions)
-                    .enumerate()
-                {
-                    experience.decisions_to_end = Some(index + 2);
-                }
-            }
-            self.record(
-                Experience::new(state, action, reward, None, self.config.gamma),
-                replay_depth,
-            )?;
+            self.record(Experience {
+                state,
+                action,
+                reward,
+                next: None,
+            })?;
         }
 
         let row = Episode {
@@ -286,13 +219,6 @@ impl<'a> Trainer<'a> {
             updates: self.learner.updates,
             epsilon: self.epsilon(),
             reward,
-            replay_depth,
-            replay_eligible: replay_depth.map_or(self.replay.len(), |depth| {
-                self.replay
-                    .iter()
-                    .filter(|experience| experience.is_within_depth(depth))
-                    .count()
-            }),
             opponent,
             opponent_seed,
         };
@@ -309,10 +235,7 @@ impl<'a> Trainer<'a> {
         self.config.epsilon_start + progress * (self.config.epsilon_end - self.config.epsilon_start)
     }
 
-    fn record(&mut self, experience: Experience, replay_depth: Option<usize>) -> Result<()> {
-        if let Some(trace) = &mut self.trace {
-            trace.inserted.observe(&experience);
-        }
+    fn record(&mut self, experience: Experience) -> Result<()> {
         if self.replay.len() == self.config.replay_capacity.get() {
             self.replay.pop_front();
         }
@@ -323,47 +246,23 @@ impl<'a> Trainer<'a> {
             && self
                 .replay_insertions
                 .is_multiple_of(self.config.train_every.get())
-            && self
-                .trace
-                .as_ref()
-                .is_none_or(|trace| self.learner.updates < trace.update_limit)
         {
-            self.optimize(replay_depth)?;
+            self.optimize()?;
         }
         Ok(())
     }
 
-    fn optimize(&mut self, replay_depth: Option<usize>) -> Result<()> {
-        let size = self.config.batch_size.get();
-        let batch: Vec<_> = if let Some(depth) = replay_depth {
-            let eligible: Vec<_> = self
-                .replay
-                .iter()
-                .filter(|experience| experience.is_within_depth(depth))
-                .collect();
-            if eligible.len() < size {
-                return Ok(());
-            }
-            index::sample(&mut self.sampling, eligible.len(), size)
-                .iter()
-                .map(|index| eligible[index])
-                .collect()
-        } else {
-            index::sample(&mut self.sampling, self.replay.len(), size)
-                .iter()
-                .map(|index| &self.replay[index])
-                .collect()
-        };
-        if let Some(trace) = &mut self.trace {
-            trace.record_batch(&batch, &self.replay);
-        }
-        self.learner.update_batch(
-            self.config,
-            self.device,
-            &self.training_device,
-            &batch,
-            self.config.target,
+    fn optimize(&mut self) -> Result<()> {
+        let batch: Vec<_> = index::sample(
+            &mut self.sampling,
+            self.replay.len(),
+            self.config.batch_size.get(),
         )
+        .iter()
+        .map(|index| &self.replay[index])
+        .collect();
+        self.learner
+            .update_batch(self.config, self.device, &self.training_device, &batch)
     }
 }
 
@@ -374,7 +273,6 @@ impl Learner {
         device: &Device,
         training_device: &Device,
         batch: &[&Experience],
-        target: Target,
     ) -> Result<()> {
         let size = batch.len();
         let mut legal = Vec::with_capacity(size * ACTIONS);
@@ -402,7 +300,7 @@ impl Learner {
         let legal = Tensor::from_data(TensorData::new(legal, [size, ACTIONS]), device);
         let terminals = Tensor::from_data(TensorData::new(terminals, [size, 1]), device);
         let rewards = Tensor::from_data(TensorData::new(rewards, [size, 1]), device);
-        let selector = match target {
+        let selector = match config.target {
             Target::Dqn => None,
             Target::DoubleDqn => Some(self.online.valid().forward(next_states(), device)),
         };
@@ -498,68 +396,6 @@ mod tests {
             }
             assert_eq!(heuristic_games, 1);
         }
-    }
-
-    #[test]
-    fn sequence_shaping_preserves_the_completed_discounted_return() {
-        let game = sequence_game::Game::new(GameConfig {
-            shuffle_seed: 0,
-            starting_player: Player::One,
-            policies: Default::default(),
-        });
-        let view = game.view(Player::One);
-        let decision = |potential| {
-            Rc::new(Decision {
-                observation: Observation::new(&view),
-                legal: legal_mask(&view),
-                potential,
-                winning_actions: Vec::new(),
-            })
-        };
-        let gamma = 0.99;
-        for outcome in [-1.0, 0.0, 1.0] {
-            let first = decision(0.1);
-            let claim = Experience::new(decision(0.0), 0, 0.0, Some(Rc::clone(&first)), gamma);
-            let finish = Experience::new(first, 0, outcome, None, gamma);
-            assert_eq!(claim.reward, gamma * 0.1);
-            assert_eq!(finish.reward, outcome - 0.1);
-            assert!((claim.reward + gamma * finish.reward - gamma * outcome).abs() < 1e-6);
-        }
-    }
-
-    #[test]
-    fn replay_curriculum_widens_existing_tails_then_uses_all_decisions() {
-        let config: Config = serde_json::from_str(include_str!(
-            "../../../../experiments/archive/dqn-curriculum.json"
-        ))
-        .unwrap();
-        let device = Device::flex();
-        let mut trainer = Trainer::new(&config, &device);
-
-        let first = trainer.play_episode(200).unwrap();
-        assert!(first.reward.is_some());
-        assert_eq!(first.replay_depth, Some(8));
-        assert_eq!(first.replay_eligible, first.decisions.min(8));
-        assert!(
-            trainer
-                .replay
-                .iter()
-                .rev()
-                .enumerate()
-                .all(|(index, experience)| experience.decisions_to_end == Some(index + 1))
-        );
-
-        let second = trainer.play_episode(201).unwrap();
-        assert!(second.reward.is_some());
-        assert_eq!(second.replay_depth, Some(16));
-        assert_eq!(
-            second.replay_eligible,
-            first.decisions.min(16) + (second.decisions - first.decisions).min(16)
-        );
-
-        let full = trainer.play_episode(801).unwrap();
-        assert_eq!(full.replay_depth, None);
-        assert_eq!(full.replay_eligible, trainer.replay.len());
     }
 
     #[test]

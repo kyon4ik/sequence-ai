@@ -1,6 +1,7 @@
 use std::{
     cell::Cell,
     fs,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
 };
 
@@ -18,7 +19,7 @@ use crate::{
 };
 
 use super::{
-    Config, last_seed,
+    Evaluation, last_seed,
     model::{GreedyPolicy, Network, ParameterCounts},
 };
 
@@ -125,10 +126,11 @@ struct Summary<'a> {
     latest_evaluation: &'a [Checkpoint],
 }
 
-pub fn evaluate(
+pub(super) fn evaluate(
     network: &Network,
     device: &Device,
-    config: &Config,
+    settings: &Evaluation,
+    action_limit: NonZeroUsize,
     options: Options,
 ) -> Result<[Totals; 2]> {
     #[derive(Serialize)]
@@ -144,14 +146,13 @@ pub fn evaluate(
         .map(fs::File::create_new)
         .transpose()?
         .map(csv::Writer::from_writer);
-    let settings = &config.evaluation;
     let last = last_seed(settings.first_shuffle_seed, settings.deal_count)?;
     let mut evaluation = EvaluationConfig {
         policy_ids: ["dqn".into(), String::new()],
         shuffle_seeds: (settings.first_shuffle_seed..=last).collect(),
         starting_player: Player::One,
         policy_seed: settings.policy_seed,
-        action_limit: config.action_limit,
+        action_limit,
         capture_replays: false,
     };
     let mut versus = |opponent: AgentKind| -> Result<_> {

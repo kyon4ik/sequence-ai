@@ -12,14 +12,13 @@ use std::{
 
 use burn::{module::Module, tensor::Device};
 use clap::ValueEnum;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::Result;
 
 use self::{evaluation::evaluate, model::Network, training::Trainer};
 
 pub use evaluation::Options as EvaluationOptions;
-pub use training::diagnostics;
 
 #[derive(Clone, Copy, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -74,18 +73,16 @@ struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     heuristic_opponent_every: Option<NonZeroUsize>,
     checkpoint_every: NonZeroUsize,
-    #[serde(default)]
-    sequence_shaping_weight: f32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    replay_curriculum: Vec<ReplayStage>,
     evaluation: Evaluation,
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ReplayStage {
-    through_episode: NonZeroUsize,
-    max_decisions_to_end: NonZeroUsize,
+#[derive(Deserialize)]
+struct SavedEvaluation {
+    device: Backend,
+    first_shuffle_seed: u64,
+    episodes: NonZeroUsize,
+    action_limit: NonZeroUsize,
+    evaluation: Evaluation,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -97,26 +94,12 @@ struct Evaluation {
 }
 
 impl Config {
-    fn read(path: &Path, backend: Option<Backend>) -> Result<Self> {
-        let bytes = fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        let mut config: Self = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        if let Some(backend) = backend {
-            config.device = backend;
-        }
-        config.validate()?;
-        Ok(config)
-    }
-
     fn validate(&self) -> Result<()> {
         if !(0.0..=1.0).contains(&self.gamma) {
             return Err("gamma must be between 0 and 1".into());
         }
         if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
             return Err("learning_rate must be positive and finite".into());
-        }
-        if !self.sequence_shaping_weight.is_finite() || self.sequence_shaping_weight < 0.0 {
-            return Err("sequence_shaping_weight must be nonnegative and finite".into());
         }
         if !(0.0..=1.0).contains(&self.epsilon_start)
             || !(0.0..=self.epsilon_start).contains(&self.epsilon_end)
@@ -128,33 +111,26 @@ impl Config {
                 "replay must satisfy batch_size <= replay_warmup <= replay_capacity".into(),
             );
         }
-        if self.replay_curriculum.windows(2).any(|pair| {
-            pair[0].through_episode >= pair[1].through_episode
-                || pair[0].max_decisions_to_end >= pair[1].max_decisions_to_end
-        }) {
-            return Err(
-                "replay curriculum episode bounds and depths must strictly increase".into(),
-            );
-        }
 
-        let train_last = last_seed(self.first_shuffle_seed, self.episodes)?;
-        let eval_last = last_seed(
-            self.evaluation.first_shuffle_seed,
-            self.evaluation.deal_count,
-        )?;
-        if self.first_shuffle_seed <= eval_last && self.evaluation.first_shuffle_seed <= train_last
-        {
+        self.evaluation
+            .validate_deals(self.first_shuffle_seed, self.episodes)
+    }
+}
+
+impl Evaluation {
+    fn validate_deals(&self, train_first: u64, episodes: NonZeroUsize) -> Result<()> {
+        let train_last = last_seed(train_first, episodes)?;
+        let eval_last = last_seed(self.first_shuffle_seed, self.deal_count)?;
+        if train_first <= eval_last && self.first_shuffle_seed <= train_last {
             return Err("training and evaluation shuffle seeds must be disjoint".into());
         }
         Ok(())
     }
+}
 
-    fn replay_depth(&self, episode: usize) -> Option<usize> {
-        self.replay_curriculum
-            .iter()
-            .find(|stage| episode <= stage.through_episode.get())
-            .map(|stage| stage.max_decisions_to_end.get())
-    }
+fn read_config<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let bytes = fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()).into())
 }
 
 fn last_seed(first: u64, count: NonZeroUsize) -> Result<u64> {
@@ -169,7 +145,11 @@ pub fn train(
     backend: Option<Backend>,
     seed: Option<u64>,
 ) -> Result<()> {
-    let mut config = Config::read(path, backend)?;
+    let mut config: Config = read_config(path)?;
+    config.validate()?;
+    if let Some(backend) = backend {
+        config.device = backend;
+    }
     if let Some(seed) = seed {
         config.seed = seed;
     }
@@ -200,7 +180,13 @@ pub fn train(
         trainer.learner.online.valid().save_file(&path)?;
         let network = Network::load(&path, &device)?;
 
-        for totals in evaluate(&network, &device, &config, EvaluationOptions::default())? {
+        for totals in evaluate(
+            &network,
+            &device,
+            &config.evaluation,
+            config.action_limit,
+            EvaluationOptions::default(),
+        )? {
             let row = evaluation::Checkpoint {
                 episode,
                 decisions: trainer.decisions,
@@ -243,10 +229,19 @@ pub fn evaluate_checkpoint(
     backend: Option<Backend>,
     options: EvaluationOptions,
 ) -> Result<()> {
-    let config = Config::read(config, backend)?;
-    let device = config.device.device()?;
+    let config: SavedEvaluation = read_config(config)?;
+    config
+        .evaluation
+        .validate_deals(config.first_shuffle_seed, config.episodes)?;
+    let device = backend.unwrap_or(config.device).device()?;
     let network = Network::load(path, &device)?;
-    let results = evaluate(&network, &device, &config, options)?;
+    let results = evaluate(
+        &network,
+        &device,
+        &config.evaluation,
+        config.action_limit,
+        options,
+    )?;
     println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())
 }

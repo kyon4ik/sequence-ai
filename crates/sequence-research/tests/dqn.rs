@@ -44,10 +44,18 @@ fn trains_and_evaluates_a_checkpoint_against_both_baselines() {
             .contains("518544 trainable parameters")
     );
 
+    let mut legacy_config: Value =
+        serde_json::from_slice(&fs::read(directory.join("config.json")).unwrap()).unwrap();
+    legacy_config["sequence_shaping_weight"] = json!(0.1);
+    legacy_config["replay_curriculum"] =
+        json!([{ "through_episode": 1, "max_decisions_to_end": 8 }]);
+    let legacy_path = workspace.path().join("legacy.json");
+    fs::write(&legacy_path, legacy_config.to_string()).unwrap();
+
     let evaluate = Command::new(executable)
         .arg("evaluate-dqn")
         .arg(directory.join("checkpoints/episode-000001.bpk"))
-        .arg(directory.join("config.json"))
+        .arg(legacy_path)
         .output()
         .unwrap();
     assert!(

@@ -46,7 +46,7 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Train DQN or Double DQN in self-play and evaluate checkpoints against Random and Heuristic
+    /// Train DQN or Double DQN and evaluate checkpoints against Random and Heuristic
     TrainDqn {
         /// JSON training experiment config
         config: PathBuf,
@@ -72,8 +72,6 @@ enum Command {
         #[command(flatten)]
         options: dqn::EvaluationOptions,
     },
-    /// Verify terminal learning and compare DQN targets or replay sampling on shared self-play games
-    DiagnoseDqn(dqn::diagnostics::Options),
     /// Rank tactical actions on identical held-out positions across saved runs
     ProbeDqn(dqn::probe::Options),
     /// Open a local browser to filter and replay games from a run
@@ -106,7 +104,6 @@ fn main() -> ExitCode {
             device,
             options,
         } => dqn::evaluate_checkpoint(&checkpoint, &config, device, options),
-        Command::DiagnoseDqn(options) => dqn::diagnostics::run(options),
         Command::ProbeDqn(options) => dqn::probe::run(options),
         Command::Inspect {
             run,

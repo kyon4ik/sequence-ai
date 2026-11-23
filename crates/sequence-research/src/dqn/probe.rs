@@ -123,13 +123,13 @@ struct Score<'a> {
     gap: f32,
 }
 
-pub(super) struct Ranking {
-    pub rank: usize,
-    pub best_tactical_q: f32,
-    pub best_alternative_q: f32,
+struct Ranking {
+    rank: usize,
+    best_tactical_q: f32,
+    best_alternative_q: f32,
 }
 
-pub(super) fn rank_actions(scores: &[f32], candidates: &mut [(usize, bool)]) -> Option<Ranking> {
+fn rank_actions(scores: &[f32], candidates: &mut [(usize, bool)]) -> Option<Ranking> {
     candidates.sort_by(|(a, _), (b, _)| scores[*b].total_cmp(&scores[*a]).then(a.cmp(b)));
     let rank = candidates.iter().position(|(_, tactical)| *tactical)?;
     let &(alternative, _) = candidates.iter().find(|(_, tactical)| !tactical)?;
