@@ -1,4 +1,8 @@
-use std::{cell::Cell, fs, path::Path};
+use std::{
+    cell::Cell,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use burn::tensor::Device;
 use clap::Args;
@@ -8,14 +12,17 @@ use sequence_game::{Action, Player, PlayerView};
 use sequence_match::{EvaluationConfig, evaluate as evaluate_matches};
 use serde::Serialize;
 
-use crate::{Result, experiment::AgentKind};
+use crate::{
+    Result,
+    experiment::{AgentKind, GameEnd},
+};
 
 use super::{
     Config, last_seed,
     model::{GreedyPolicy, Network, ParameterCounts},
 };
 
-#[derive(Args, Clone, Copy, Default)]
+#[derive(Args, Default)]
 pub struct Options {
     /// Count turns with a legal first-sequence or immediate winning move and how often it is taken
     #[arg(long)]
@@ -23,6 +30,9 @@ pub struct Options {
     /// Take an immediate win when available and report tactical counts
     #[arg(long)]
     take_immediate_wins: bool,
+    /// Write one row per deal, seat, and opponent to a new CSV
+    #[arg(long)]
+    pub(super) games: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Default, Serialize)]
@@ -121,6 +131,19 @@ pub fn evaluate(
     config: &Config,
     options: Options,
 ) -> Result<[Totals; 2]> {
+    #[derive(Serialize)]
+    struct GameRow {
+        shuffle_seed: u64,
+        learner_seat: usize,
+        opponent: AgentKind,
+        outcome: GameEnd,
+    }
+    let mut games = options
+        .games
+        .as_deref()
+        .map(fs::File::create_new)
+        .transpose()?
+        .map(csv::Writer::from_writer);
     let settings = &config.evaluation;
     let last = last_seed(settings.first_shuffle_seed, settings.deal_count)?;
     let mut evaluation = EvaluationConfig {
@@ -147,6 +170,19 @@ pub fn evaluate(
             },
             |seed| opponent.build(seed),
         )?;
+        if let Some(writer) = &mut games {
+            for pair in &report.pairs {
+                for (seat, game) in pair.iter().enumerate() {
+                    writer.serialize(GameRow {
+                        shuffle_seed: game.config.game.shuffle_seed,
+                        learner_seat: seat + 1,
+                        opponent,
+                        outcome: game.end.into(),
+                    })?;
+                }
+            }
+            writer.flush()?;
+        }
         let [wins, losses] = report.totals.wins;
         let draws = report.totals.draws;
         let completed = wins + losses + draws;

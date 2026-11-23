@@ -1,6 +1,7 @@
 mod evaluation;
 mod model;
 mod observation;
+pub mod probe;
 mod training;
 
 use std::{
@@ -18,6 +19,7 @@ use crate::Result;
 use self::{evaluation::evaluate, model::Network, training::Trainer};
 
 pub use evaluation::Options as EvaluationOptions;
+pub use training::diagnostics;
 
 #[derive(Clone, Copy, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -180,17 +182,17 @@ pub fn train(
     let mut evaluations = csv::Writer::from_path(output.join("evaluation.csv"))?;
     let mut rows = Vec::new();
     let mut trainer = Trainer::new(&config, &device);
-    let model = trainer.online.parameter_counts();
+    let model = trainer.learner.online.parameter_counts();
     let mut checkpoint = |episode, trainer: &Trainer<'_>| -> Result<()> {
         let path = checkpoints.join(format!("episode-{episode:06}.bpk"));
-        trainer.online.valid().save_file(&path)?;
+        trainer.learner.online.valid().save_file(&path)?;
         let network = Network::load(&path, &device)?;
 
         for totals in evaluate(&network, &device, &config, EvaluationOptions::default())? {
             let row = evaluation::Checkpoint {
                 episode,
                 decisions: trainer.decisions,
-                updates: trainer.updates,
+                updates: trainer.learner.updates,
                 opponent: totals.opponent,
                 wins: totals.wins,
                 draws: totals.draws,
