@@ -1,0 +1,27 @@
+{
+  "device": "cuda",
+  "inference_device": "cpu",
+  "target": "dqn",
+  "seed": 42,
+  "first_shuffle_seed": 0,
+  "episodes": 51200,
+  "action_limit": 512,
+  "gamma": 0.99,
+  "learning_rate": 0.0001,
+  "epsilon_start": 1.0,
+  "epsilon_end": 0.05,
+  "epsilon_decay_decisions": 750000,
+  "batch_size": 128,
+  "replay_capacity": 20000,
+  "replay_warmup": 1024,
+  "train_every": 20,
+  "target_update_every": 1000,
+  "opponent_update_every": 100,
+  "heuristic_opponent_every": 5,
+  "checkpoint_every": 1280,
+  "evaluation": {
+    "first_shuffle_seed": 1000000,
+    "deal_count": 50,
+    "policy_seed": 2026
+  }
+}

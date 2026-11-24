@@ -74,6 +74,8 @@ struct Config {
     opponent_update_every: NonZeroUsize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     heuristic_opponent_every: Option<NonZeroUsize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    immediate_win_loss_weight: Option<f32>,
     checkpoint_every: NonZeroUsize,
     evaluation: Evaluation,
 }
@@ -113,6 +115,12 @@ impl Config {
             return Err(
                 "replay must satisfy batch_size <= replay_warmup <= replay_capacity".into(),
             );
+        }
+        if self
+            .immediate_win_loss_weight
+            .is_some_and(|weight| !weight.is_finite() || weight < 0.0)
+        {
+            return Err("immediate_win_loss_weight must be finite and nonnegative".into());
         }
 
         self.evaluation

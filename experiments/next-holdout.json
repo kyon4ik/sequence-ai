@@ -1,0 +1,12 @@
+{
+  "device": "cuda",
+  "inference_device": "cpu",
+  "first_shuffle_seed": 0,
+  "episodes": 51200,
+  "action_limit": 512,
+  "evaluation": {
+    "first_shuffle_seed": 12000000,
+    "deal_count": 256,
+    "policy_seed": 2042
+  }
+}

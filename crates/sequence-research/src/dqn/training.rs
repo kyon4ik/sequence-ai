@@ -4,7 +4,7 @@ use burn::{
     module::Module,
     nn::loss::{HuberLossConfig, Reduction},
     optim::{AdamConfig, GradientsParams, ModuleOptimizer},
-    tensor::{Bool, Device, Int, Tensor, TensorData},
+    tensor::{Bool, Device, Int, Tensor, TensorData, activation::relu},
 };
 use rand::{Rng, SeedableRng, seq::index};
 use rand_chacha::ChaCha8Rng;
@@ -24,6 +24,29 @@ use super::{
 struct Decision {
     observation: Observation,
     legal: [bool; ACTIONS],
+    winning_actions: Vec<usize>,
+}
+
+impl Decision {
+    fn new(view: &PlayerView<'_>, label_wins: bool) -> Self {
+        let mut winning_actions = Vec::new();
+        if label_wins && view.legal_actions.len() > 1 {
+            winning_actions.extend(view.legal_actions.iter().filter_map(|&action| {
+                view.preview_play(action)
+                    .filter(|preview| preview.wins)
+                    .and_then(|_| action_index(action))
+            }));
+            if winning_actions.len() == view.legal_actions.len() {
+                winning_actions.clear();
+            }
+        }
+
+        Self {
+            observation: Observation::new(view),
+            legal: legal_mask(view),
+            winning_actions,
+        }
+    }
 }
 
 struct Experience {
@@ -168,10 +191,10 @@ impl<'a> Trainer<'a> {
                     ),
                 }
             } else {
-                let decision = Rc::new(Decision {
-                    observation: Observation::new(&view),
-                    legal: legal_mask(&view),
-                });
+                let decision = Rc::new(Decision::new(
+                    &view,
+                    self.config.immediate_win_loss_weight.unwrap_or_default() > 0.0,
+                ));
                 if let Some((state, action)) = pending.take() {
                     self.record(Experience {
                         state,
@@ -338,16 +361,28 @@ impl Learner {
 
         let actions =
             Tensor::<2, Int>::from_data(TensorData::new(actions, [size, 1]), training_device);
-        let values = self
-            .online
-            .forward(
-                batch.iter().map(|experience| &experience.state.observation),
-                training_device,
-            )
-            .gather(1, actions);
-        let loss = HuberLossConfig::new(1.0)
+        let scores = self.online.forward(
+            batch.iter().map(|experience| &experience.state.observation),
+            training_device,
+        );
+        let auxiliary = config
+            .immediate_win_loss_weight
+            .filter(|&weight| weight > 0.0)
+            .and_then(|weight| {
+                immediate_win_loss(
+                    scores.clone(),
+                    batch.iter().map(|experience| experience.state.as_ref()),
+                    training_device,
+                )
+                .map(|loss| loss * weight)
+            });
+        let values = scores.gather(1, actions);
+        let mut loss = HuberLossConfig::new(1.0)
             .init()
             .forward(values, targets, Reduction::Mean);
+        if let Some(auxiliary) = auxiliary {
+            loss = loss + auxiliary;
+        }
         if !loss.clone().into_scalar::<f32>().is_finite() {
             return Err(
                 format!("DQN loss became non-finite after {} updates", self.updates).into(),
@@ -367,6 +402,56 @@ impl Learner {
         }
         Ok(())
     }
+}
+
+fn immediate_win_loss<'a>(
+    scores: Tensor<2>,
+    decisions: impl Iterator<Item = &'a Decision>,
+    device: &Device,
+) -> Option<Tensor<1>> {
+    const MARGIN: f32 = 0.1;
+
+    let mut rows = Vec::new();
+    let mut winning = Vec::new();
+    let mut alternatives = Vec::new();
+    for (row, state) in decisions.enumerate() {
+        if state.winning_actions.is_empty() {
+            continue;
+        }
+        rows.push(row as i32);
+
+        let mut wins = [false; ACTIONS];
+        for &action in &state.winning_actions {
+            wins[action] = true;
+        }
+        winning.extend_from_slice(&wins);
+        alternatives.extend(
+            state
+                .legal
+                .iter()
+                .zip(wins)
+                .map(|(&legal, wins)| legal && !wins),
+        );
+    }
+    if rows.is_empty() {
+        return None;
+    }
+
+    let count = rows.len();
+    let rows = Tensor::<1, Int>::from_data(TensorData::new(rows, [count]), device);
+    let scores = scores.select(0, rows);
+    let winning = Tensor::<2, Bool>::from_data(TensorData::new(winning, [count, ACTIONS]), device);
+    let alternatives =
+        Tensor::<2, Bool>::from_data(TensorData::new(alternatives, [count, ACTIONS]), device);
+    let best_win = scores
+        .clone()
+        .mask_fill(winning.bool_not(), f32::NEG_INFINITY)
+        .max_dim(1);
+    let best_alternative = scores
+        .mask_fill(alternatives.bool_not(), f32::NEG_INFINITY)
+        .max_dim(1);
+
+    Some(relu(best_alternative - best_win + MARGIN).mean())
 }
 
 fn bellman_targets(
@@ -390,6 +475,8 @@ fn bellman_targets(
 
 #[cfg(test)]
 mod tests {
+    use sequence_game::Game;
+
     use super::*;
 
     #[test]
@@ -443,5 +530,31 @@ mod tests {
 
         let result = bellman_targets(scores, None, legal, terminals, rewards, 0.5).into_data();
         assert_eq!(result.as_slice::<f32>().unwrap(), &[1.0, -1.0]);
+    }
+
+    #[test]
+    fn immediate_win_loss_ranks_the_best_win_against_legal_alternatives() {
+        let game = Game::new(GameConfig {
+            shuffle_seed: 0,
+            starting_player: Player::One,
+            policies: Default::default(),
+        });
+        let decision = |winning_actions: Vec<usize>| {
+            let mut state = Decision::new(&game.view(Player::One), false);
+            state.legal = std::array::from_fn(|i| i < 3);
+            state.winning_actions = winning_actions;
+            state
+        };
+        let states = [decision(vec![0, 1]), decision(vec![]), decision(vec![2])];
+        let mut values = [[100.0f32; ACTIONS]; 3];
+        values[0][..3].copy_from_slice(&[-0.3, 0.1, 0.4]);
+        values[2][..3].copy_from_slice(&[0.1, 0.3, 0.8]);
+
+        let device = Device::flex();
+        let scores = Tensor::from_data(values, &device);
+        let loss = immediate_win_loss(scores, states.iter(), &device)
+            .unwrap()
+            .into_scalar::<f32>();
+        assert!((loss - 0.2).abs() < 1e-6);
     }
 }
