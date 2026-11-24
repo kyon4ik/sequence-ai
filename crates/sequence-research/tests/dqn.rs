@@ -1,4 +1,9 @@
-use std::{fs, process::Command};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::Path,
+    process::Command,
+};
 
 use serde_json::{Value, json};
 
@@ -84,4 +89,101 @@ fn trains_and_evaluates_a_checkpoint_against_both_baselines() {
         String::from_utf8_lossy(&evaluate_on_cpu.stderr)
     );
     assert_eq!(evaluate_on_cpu.stdout, evaluate.stdout);
+}
+
+#[test]
+fn resume_recovers_the_latest_checkpoint_and_matches_uninterrupted_training() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path();
+    let config_path = root.join("config.json");
+    let uninterrupted = root.join("uninterrupted");
+    let resumed = root.join("resumed");
+    let mut config: Value = serde_json::from_str(include_str!("fixtures/dqn.json")).unwrap();
+    config["target"] = json!("double_dqn");
+    let fields = config.as_object_mut().unwrap();
+    for name in ["epsilon_start", "epsilon_end", "epsilon_decay_decisions"] {
+        fields.remove(name);
+    }
+    config["temperature"] = json!({"start": 0.5, "end": 0.025, "decay_decisions": 80});
+    config["checkpoint_every"] = json!(2);
+    config["action_limit"] = json!(16);
+    config["replay_capacity"] = json!(12);
+    config["train_every"] = json!(2);
+    config["target_update_every"] = json!(5);
+    config["opponent_update_every"] = json!(4);
+    config["heuristic_opponent_every"] = json!(5);
+
+    let mut train = |episodes, output: &Path| {
+        config["episodes"] = json!(episodes);
+        fs::write(&config_path, config.to_string()).unwrap();
+        run_successfully(
+            Command::new(env!("CARGO_BIN_EXE_sequence-research"))
+                .arg("train-dqn")
+                .arg(&config_path)
+                .arg("--output")
+                .arg(output),
+        );
+    };
+    train(8, &uninterrupted);
+    train(6, &resumed);
+
+    for name in ["training.csv", "evaluation.csv"] {
+        let mut log = OpenOptions::new()
+            .append(true)
+            .open(resumed.join(name))
+            .unwrap();
+        log.write_all(b"incomplete trailing row").unwrap();
+    }
+    let split_checkpoint = resumed.join("checkpoints/episode-000006.bpk");
+    let split_weights = fs::read(&split_checkpoint).unwrap();
+    fs::remove_file(&split_checkpoint).unwrap();
+
+    let state = resumed.join("training-state.cbor");
+    let split_state = fs::read(&state).unwrap();
+    run_successfully(
+        Command::new(env!("CARGO_BIN_EXE_sequence-research"))
+            .arg("resume-dqn")
+            .arg(&resumed)
+            .args(["--episodes", "8"]),
+    );
+
+    assert_eq!(fs::read(&split_checkpoint).unwrap(), split_weights);
+    assert_ne!(fs::read(state).unwrap(), split_state);
+    for name in [
+        "training.csv",
+        "evaluation.csv",
+        "summary.json",
+        "config.json",
+    ] {
+        assert_eq!(
+            fs::read(resumed.join(name)).unwrap(),
+            fs::read(uninterrupted.join(name)).unwrap(),
+            "{name} differs after resuming",
+        );
+    }
+
+    let final_tensors = |run: &Path| {
+        burn_pack::Reader::from_file(run.join("checkpoints/episode-000008.bpk"))
+            .unwrap()
+            .into_tensors()
+            .unwrap()
+    };
+    let expected = final_tensors(&uninterrupted);
+    let actual = final_tensors(&resumed);
+    assert_eq!(expected.len(), actual.len());
+    for (expected, actual) in expected.into_iter().zip(actual) {
+        let (name, _, _, _, expected) = expected.into_parts().unwrap();
+        let (actual_name, _, _, _, actual) = actual.into_parts().unwrap();
+        assert_eq!(name, actual_name);
+        assert!(*expected == *actual, "tensor {name} differs after resuming");
+    }
+}
+
+fn run_successfully(command: &mut Command) {
+    let result = command.env("RAYON_NUM_THREADS", "2").output().unwrap();
+    assert!(
+        result.status.success(),
+        "{command:?}: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }

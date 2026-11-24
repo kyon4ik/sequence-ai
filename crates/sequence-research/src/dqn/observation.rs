@@ -1,4 +1,5 @@
 use sequence_game::{Action, BOARD_SIZE, Card, PlayerView, Position, Rank, Space};
+use serde::{Deserialize, Serialize};
 
 pub const BOARD_CHANNELS: usize = 5;
 pub const SQUARES: usize = BOARD_SIZE * BOARD_SIZE;
@@ -50,8 +51,11 @@ fn card_counts(cards: &[Card]) -> [f32; CARDS] {
     counts
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Observation {
+    #[serde(with = "super::snapshot::array")]
     pub board: [f32; BOARD_CHANNELS * SQUARES],
+    #[serde(with = "super::snapshot::array")]
     pub features: [f32; CONTEXT_FEATURES],
 }
 

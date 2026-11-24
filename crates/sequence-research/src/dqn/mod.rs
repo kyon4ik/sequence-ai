@@ -2,25 +2,32 @@ mod evaluation;
 mod model;
 mod observation;
 pub mod probe;
+mod snapshot;
 mod training;
 
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
     num::NonZeroUsize,
     path::{Path, PathBuf},
 };
 
-use burn::{module::Module, tensor::Device};
+use burn::{module::Module, store::ModuleRecord, tensor::Device};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::Result;
 
-use self::{evaluation::evaluate, model::Network, training::Trainer};
+use self::{
+    evaluation::{Checkpoint, evaluate},
+    model::Network,
+    snapshot::{LogOffsets, Metadata},
+    training::Trainer,
+};
 
 pub use evaluation::Options as EvaluationOptions;
 
-#[derive(Clone, Copy, Deserialize, Serialize, ValueEnum)]
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
     Cpu,
@@ -41,7 +48,7 @@ impl Backend {
     }
 }
 
-#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Target {
     #[default]
@@ -49,7 +56,7 @@ enum Target {
     DoubleDqn,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Schedule {
     start: f64,
@@ -78,7 +85,7 @@ enum Exploration {
     Temperature(Schedule),
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
     device: Backend,
@@ -124,7 +131,7 @@ struct SavedEvaluation {
     evaluation: Evaluation,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Evaluation {
     first_shuffle_seed: u64,
@@ -236,30 +243,183 @@ pub fn train(
     }
     fs::create_dir(&output).map_err(|error| format!("{}: {error}", output.display()))?;
 
-    let checkpoints = output.join("checkpoints");
-    fs::create_dir(&checkpoints)?;
-    fs::write(
-        output.join("config.json"),
-        serde_json::to_string_pretty(&config)? + "\n",
-    )?;
-    let mut episodes = csv::Writer::from_path(output.join("training.csv"))?;
-    let mut evaluations = csv::Writer::from_path(output.join("evaluation.csv"))?;
-    let mut rows = Vec::new();
+    fs::create_dir(output.join("checkpoints"))?;
+    write_config(&output, &config)?;
+    let logs = TrainingLogs::create(&output)?;
+    let trainer = Trainer::new(&config, exploration, &device, &inference_device);
+    train_run(&output, &config, &inference_device, trainer, logs, None)
+}
+
+pub fn resume(output: &Path, episodes: Option<NonZeroUsize>) -> Result<()> {
+    let training = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(output.join("training.csv"))?;
+    lock_training(&training, output)?;
+    let (mut metadata, reader) = snapshot::open(output)?;
+
+    let mut config: Config = read_config(&output.join("config.json"))?;
+    metadata.config.episodes = config.episodes;
+    if metadata.config != config {
+        return Err("only the episode budget can change when resuming training".into());
+    }
+    if let Some(episodes) = episodes {
+        config.episodes = episodes;
+    }
+    if config.episodes.get() < metadata.episode {
+        return Err(format!(
+            "the latest checkpoint already completed {} episodes",
+            metadata.episode
+        )
+        .into());
+    }
+
+    let exploration = config.validate()?;
+    let device = config.device.device()?;
+    let inference_device = config.inference_device.unwrap_or(config.device).device()?;
     let mut trainer = Trainer::new(&config, exploration, &device, &inference_device);
+    let online = trainer.restore_state(reader)?;
+    let logs = TrainingLogs::resume(output, training, &metadata, &trainer)?;
+
+    let path = snapshot::policy_path(output, metadata.episode);
+    if !path.try_exists()? {
+        snapshot::atomic_write(&path, |writer| Ok(writer.write_all(&online)?))?;
+    }
+    write_config(output, &config)?;
+    eprintln!(
+        "Resuming from checkpoint {} after {} learner decisions",
+        metadata.episode, trainer.decisions
+    );
+    train_run(
+        output,
+        &config,
+        &inference_device,
+        trainer,
+        logs,
+        Some(metadata.episode),
+    )
+}
+
+fn write_config(output: &Path, config: &Config) -> Result<()> {
+    snapshot::atomic_write(&output.join("config.json"), |writer| {
+        serde_json::to_writer_pretty(&mut *writer, config)?;
+        Ok(writer.write_all(b"\n")?)
+    })
+}
+
+fn lock_training(file: &File, output: &Path) -> Result<()> {
+    file.try_lock().map_err(|error| {
+        format!(
+            "could not acquire the training lock for {}: {error}",
+            output.display()
+        )
+        .into()
+    })
+}
+
+struct TrainingLogs {
+    training: csv::Writer<File>,
+    evaluations: csv::Writer<File>,
+    rows: Vec<Checkpoint>,
+}
+
+impl TrainingLogs {
+    fn create(output: &Path) -> Result<Self> {
+        let training = File::create_new(output.join("training.csv"))?;
+        lock_training(&training, output)?;
+        Ok(Self {
+            training: csv::Writer::from_writer(training),
+            evaluations: csv::Writer::from_path(output.join("evaluation.csv"))?,
+            rows: Vec::new(),
+        })
+    }
+
+    fn resume(
+        output: &Path,
+        mut training: File,
+        metadata: &Metadata,
+        trainer: &Trainer<'_>,
+    ) -> Result<Self> {
+        let mut evaluation = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(output.join("evaluation.csv"))?;
+        let offsets = metadata.logs;
+        if training.metadata()?.len() < offsets.training
+            || evaluation.metadata()?.len() < offsets.evaluation
+        {
+            return Err("training or evaluation CSV is shorter than the latest snapshot".into());
+        }
+        let rows: Vec<Checkpoint> =
+            csv::Reader::from_reader((&evaluation).take(offsets.evaluation))
+                .deserialize()
+                .collect::<std::result::Result<_, _>>()?;
+        if !rows.last().is_some_and(|row| {
+            row.episode == metadata.episode
+                && row.decisions == trainer.decisions
+                && row.updates == trainer.learner.updates
+        }) {
+            return Err("evaluation CSV disagrees with the latest training snapshot".into());
+        }
+
+        // Discard rows written after the last committed snapshot before replaying those episodes.
+        training.set_len(offsets.training)?;
+        training.seek(SeekFrom::Start(offsets.training))?;
+        evaluation.set_len(offsets.evaluation)?;
+        evaluation.seek(SeekFrom::Start(offsets.evaluation))?;
+
+        Ok(Self {
+            training: csv::WriterBuilder::new()
+                .has_headers(offsets.training == 0)
+                .from_writer(training),
+            evaluations: csv::WriterBuilder::new()
+                .has_headers(false)
+                .from_writer(evaluation),
+            rows,
+        })
+    }
+
+    fn sync(&mut self) -> Result<LogOffsets> {
+        self.training.flush()?;
+        self.evaluations.flush()?;
+        self.training.get_ref().sync_all()?;
+        self.evaluations.get_ref().sync_all()?;
+        Ok(LogOffsets {
+            training: self.training.get_ref().metadata()?.len(),
+            evaluation: self.evaluations.get_ref().metadata()?.len(),
+        })
+    }
+}
+
+fn train_run(
+    output: &Path,
+    config: &Config,
+    inference_device: &Device,
+    mut trainer: Trainer<'_>,
+    mut logs: TrainingLogs,
+    completed: Option<usize>,
+) -> Result<()> {
     let model = trainer.learner.online.parameter_counts();
-    let mut checkpoint = |episode, trainer: &Trainer<'_>| -> Result<()> {
-        let path = checkpoints.join(format!("episode-{episode:06}.bpk"));
-        trainer.learner.online.valid().save_file(&path)?;
-        let network = Network::load(&path, &inference_device)?;
+    let checkpoint = |episode, trainer: &Trainer<'_>, logs: &mut TrainingLogs| -> Result<()> {
+        let online = trainer
+            .learner
+            .online
+            .valid()
+            .into_record()
+            .into_bytes()?
+            .shared();
+        let network = Network::new(inference_device)
+            .try_load_record(ModuleRecord::from_bytes(online.clone())?)?
+            .valid();
 
         for totals in evaluate(
             &network,
-            &inference_device,
+            inference_device,
             &config.evaluation,
             config.action_limit,
             EvaluationOptions::default(),
         )? {
-            let row = evaluation::Checkpoint {
+            let row = Checkpoint {
                 episode,
                 decisions: trainer.decisions,
                 updates: trainer.learner.updates,
@@ -270,11 +430,22 @@ pub fn train(
                 cutoffs: totals.cutoffs,
                 win_rate: totals.win_rate,
             };
-            evaluations.serialize(&row)?;
-            rows.push(row);
+            logs.evaluations.serialize(&row)?;
+            logs.rows.push(row);
         }
-        evaluations.flush()?;
-        evaluation::write_report(&output, model, &rows)?;
+
+        let metadata = Metadata {
+            config: config.clone(),
+            episode,
+            logs: logs.sync()?,
+        };
+        snapshot::save(output, &metadata, trainer, &online)?;
+
+        // The snapshot can restore the policy artifact if interrupted after committing it.
+        snapshot::atomic_write(&snapshot::policy_path(output, episode), |writer| {
+            Ok(writer.write_all(&online)?)
+        })?;
+        evaluation::write_report(output, model, &logs.rows)?;
         eprintln!(
             "Evaluated checkpoint {episode} after {} learner decisions",
             trainer.decisions
@@ -282,13 +453,18 @@ pub fn train(
         Ok(())
     };
 
-    checkpoint(0, &trainer)?;
-    for episode in 1..=config.episodes.get() {
-        episodes.serialize(trainer.play_episode(episode)?)?;
-        episodes.flush()?;
+    if completed.is_some() {
+        evaluation::write_report(output, model, &logs.rows)?;
+    } else {
+        checkpoint(0, &trainer, &mut logs)?;
+    }
+    for episode in completed.unwrap_or_default()..config.episodes.get() {
+        let episode = episode + 1;
+        logs.training.serialize(trainer.play_episode(episode)?)?;
+        logs.training.flush()?;
         if episode.is_multiple_of(config.checkpoint_every.get()) || episode == config.episodes.get()
         {
-            checkpoint(episode, &trainer)?;
+            checkpoint(episode, &trainer, &mut logs)?;
         }
     }
     println!("Results saved to {}", output.display());

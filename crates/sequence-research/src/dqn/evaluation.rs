@@ -11,7 +11,7 @@ use plotters::prelude::*;
 use sequence_agents::Policy;
 use sequence_game::{Action, Player, PlayerView};
 use sequence_match::{EvaluationConfig, evaluate as evaluate_matches};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Result,
@@ -107,7 +107,7 @@ pub struct Totals {
     tactics: Option<Tactics>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Checkpoint {
     pub episode: usize,
     pub decisions: usize,

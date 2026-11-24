@@ -1,17 +1,22 @@
-use std::{collections::VecDeque, rc::Rc};
+use std::{
+    collections::VecDeque,
+    io::{Read, Write},
+    rc::Rc,
+};
 
 use burn::{
     module::Module,
     nn::loss::{HuberLossConfig, Reduction},
     optim::{AdamConfig, GradientsParams, ModuleOptimizer},
-    tensor::{Bool, Device, Int, Tensor, TensorData, activation::relu},
+    store::ModuleRecord,
+    tensor::{Bool, Bytes, Device, Int, Tensor, TensorData, activation::relu},
 };
 use rand::{Rng, SeedableRng, seq::index};
 use rand_chacha::ChaCha8Rng;
 use sequence_agents::{HeuristicAgent, Policy};
 use sequence_game::{Action, GameConfig, Outcome, Player, PlayerView};
 use sequence_match::{Match, MatchConfig, MatchEnd};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{Result, experiment::GameEnd};
 
@@ -21,8 +26,10 @@ use super::{
     observation::{ACTIONS, Observation, action_index, legal_mask},
 };
 
+#[derive(Serialize, Deserialize)]
 struct Decision {
     observation: Observation,
+    #[serde(with = "super::snapshot::array")]
     legal: [bool; ACTIONS],
     winning_actions: Vec<usize>,
 }
@@ -46,6 +53,7 @@ impl Decision {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct Experience {
     state: Rc<Decision>,
     action: usize,
@@ -98,6 +106,23 @@ pub struct Trainer<'a> {
     replay_insertions: usize,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SavedTrainer<R> {
+    online: Bytes,
+    target: Bytes,
+    opponent: Bytes,
+    optimizer: Bytes,
+    replay: R,
+    exploration: ChaCha8Rng,
+    sampling: ChaCha8Rng,
+    opponent_rng: ChaCha8Rng,
+    heuristic_slot: usize,
+    opponent_episode: usize,
+    decisions: usize,
+    replay_insertions: usize,
+    updates: usize,
+}
+
 impl<'a> Trainer<'a> {
     pub fn new(
         config: &'a Config,
@@ -136,6 +161,66 @@ impl<'a> Trainer<'a> {
             decisions: 0,
             replay_insertions: 0,
         }
+    }
+
+    pub fn save_state(&self, writer: impl Write, online: &Bytes) -> Result<()> {
+        let state = SavedTrainer {
+            online: online.clone(),
+            target: self.learner.target.clone().into_record().into_bytes()?,
+            opponent: self.opponent.clone().into_record().into_bytes()?,
+            optimizer: self.learner.optimizer.into_bytes()?,
+            replay: &self.replay,
+            exploration: self.exploration.clone(),
+            sampling: self.sampling.clone(),
+            opponent_rng: self.opponent_rng.clone(),
+            heuristic_slot: self.heuristic_slot,
+            opponent_episode: self.opponent_episode,
+            decisions: self.decisions,
+            replay_insertions: self.replay_insertions,
+            updates: self.learner.updates,
+        };
+        ciborium::into_writer(&state, writer)?;
+        Ok(())
+    }
+
+    pub fn restore_state(&mut self, reader: impl Read) -> Result<Bytes> {
+        let state: SavedTrainer<VecDeque<Experience>> = ciborium::from_reader(reader)?;
+        if state.replay.len()
+            != state
+                .replay_insertions
+                .min(self.config.replay_capacity.get())
+        {
+            return Err("checkpoint replay length disagrees with the insertion count".into());
+        }
+
+        let online = state.online.shared();
+        self.learner.online = self
+            .learner
+            .online
+            .clone()
+            .try_load_record(ModuleRecord::from_bytes(online.clone())?)?;
+        self.learner.target = self
+            .learner
+            .target
+            .clone()
+            .try_load_record(ModuleRecord::from_bytes(state.target)?)?;
+        self.opponent = self
+            .opponent
+            .clone()
+            .try_load_record(ModuleRecord::from_bytes(state.opponent)?)?;
+        self.learner.optimizer = AdamConfig::new().init().from_bytes(state.optimizer)?;
+
+        self.learner_policy = None;
+        self.replay = state.replay;
+        self.exploration = state.exploration;
+        self.sampling = state.sampling;
+        self.opponent_rng = state.opponent_rng;
+        self.heuristic_slot = state.heuristic_slot;
+        self.opponent_episode = state.opponent_episode;
+        self.decisions = state.decisions;
+        self.replay_insertions = state.replay_insertions;
+        self.learner.updates = state.updates;
+        Ok(online)
     }
 
     pub fn play_episode(&mut self, episode: usize) -> Result<Episode> {

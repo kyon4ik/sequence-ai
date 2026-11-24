@@ -60,6 +60,14 @@ enum Command {
         #[arg(long)]
         seed: Option<u64>,
     },
+    /// Resume DQN training in the same run directory from its latest saved checkpoint
+    ResumeDqn {
+        /// Directory produced by the train-dqn command
+        run: PathBuf,
+        /// Total target episodes, including those already completed
+        #[arg(long)]
+        episodes: Option<NonZeroUsize>,
+    },
     /// Evaluate a saved DQN checkpoint on the config's held-out deals
     EvaluateDqn {
         /// Saved .bpk checkpoint
@@ -98,6 +106,7 @@ fn main() -> ExitCode {
             device,
             seed,
         } => dqn::train(&config, output, device, seed),
+        Command::ResumeDqn { run, episodes } => dqn::resume(&run, episodes),
         Command::EvaluateDqn {
             checkpoint,
             config,
