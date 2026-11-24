@@ -49,6 +49,35 @@ enum Target {
     DoubleDqn,
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Schedule {
+    start: f64,
+    end: f64,
+    decay_decisions: NonZeroUsize,
+}
+
+impl Schedule {
+    fn progress(self, decisions: usize) -> f64 {
+        let duration = self.decay_decisions.get();
+        decisions.min(duration) as f64 / duration as f64
+    }
+
+    fn at(self, decisions: usize) -> f64 {
+        self.start + self.progress(decisions) * (self.end - self.start)
+    }
+
+    fn temperature_at(self, decisions: usize) -> f64 {
+        self.end + (1.0 - self.progress(decisions)) * (self.start - self.end)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Exploration {
+    Epsilon(Schedule),
+    Temperature(Schedule),
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -63,9 +92,14 @@ struct Config {
     action_limit: NonZeroUsize,
     gamma: f32,
     learning_rate: f64,
-    epsilon_start: f64,
-    epsilon_end: f64,
-    epsilon_decay_decisions: NonZeroUsize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epsilon_start: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epsilon_end: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epsilon_decay_decisions: Option<NonZeroUsize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<Schedule>,
     batch_size: NonZeroUsize,
     replay_capacity: NonZeroUsize,
     replay_warmup: NonZeroUsize,
@@ -99,17 +133,12 @@ struct Evaluation {
 }
 
 impl Config {
-    fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<Exploration> {
         if !(0.0..=1.0).contains(&self.gamma) {
             return Err("gamma must be between 0 and 1".into());
         }
         if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
             return Err("learning_rate must be positive and finite".into());
-        }
-        if !(0.0..=1.0).contains(&self.epsilon_start)
-            || !(0.0..=self.epsilon_start).contains(&self.epsilon_end)
-        {
-            return Err("epsilon must satisfy 0 <= epsilon_end <= epsilon_start <= 1".into());
         }
         if self.batch_size > self.replay_warmup || self.replay_warmup > self.replay_capacity {
             return Err(
@@ -124,7 +153,38 @@ impl Config {
         }
 
         self.evaluation
-            .validate_deals(self.first_shuffle_seed, self.episodes)
+            .validate_deals(self.first_shuffle_seed, self.episodes)?;
+
+        match (
+            self.epsilon_start,
+            self.epsilon_end,
+            self.epsilon_decay_decisions,
+            self.temperature,
+        ) {
+            (Some(start), Some(end), Some(decay_decisions), None) => {
+                if !(0.0..=1.0).contains(&start) || !(0.0..=start).contains(&end) {
+                    return Err(
+                        "epsilon must satisfy 0 <= epsilon_end <= epsilon_start <= 1".into(),
+                    );
+                }
+                Ok(Exploration::Epsilon(Schedule {
+                    start,
+                    end,
+                    decay_decisions,
+                }))
+            }
+            (None, None, None, Some(schedule)) => {
+                if !schedule.start.is_finite()
+                    || !(schedule.end > 0.0 && schedule.end <= schedule.start)
+                {
+                    return Err(
+                        "temperature must satisfy 0 < end <= start, with finite endpoints".into(),
+                    );
+                }
+                Ok(Exploration::Temperature(schedule))
+            }
+            _ => Err("configure either all three epsilon fields or a temperature schedule".into()),
+        }
     }
 }
 
@@ -157,7 +217,7 @@ pub fn train(
     seed: Option<u64>,
 ) -> Result<()> {
     let mut config: Config = read_config(path)?;
-    config.validate()?;
+    let exploration = config.validate()?;
     if let Some(backend) = backend {
         config.device = backend;
     }
@@ -185,7 +245,7 @@ pub fn train(
     let mut episodes = csv::Writer::from_path(output.join("training.csv"))?;
     let mut evaluations = csv::Writer::from_path(output.join("evaluation.csv"))?;
     let mut rows = Vec::new();
-    let mut trainer = Trainer::new(&config, &device, &inference_device);
+    let mut trainer = Trainer::new(&config, exploration, &device, &inference_device);
     let model = trainer.learner.online.parameter_counts();
     let mut checkpoint = |episode, trainer: &Trainer<'_>| -> Result<()> {
         let path = checkpoints.join(format!("episode-{episode:06}.bpk"));

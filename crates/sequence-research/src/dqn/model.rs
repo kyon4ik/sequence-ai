@@ -8,9 +8,15 @@ use burn::{
     },
     tensor::{Device, Tensor, TensorData, activation::relu},
 };
+use rand::{
+    Rng,
+    distr::{Distribution, weighted::WeightedIndex},
+};
 use sequence_agents::Policy;
 use sequence_game::{Action, BOARD_SIZE, PlayerView};
 use serde::Serialize;
+
+use crate::Result;
 
 use super::observation::{
     ACTIONS, BOARD_CHANNELS, CONTEXT_FEATURES, Observation, SQUARES, action_index,
@@ -101,9 +107,7 @@ impl Network {
         observation: &Observation,
         device: &Device,
     ) -> Action {
-        let scores = self
-            .forward(std::iter::once(observation), device)
-            .into_data();
+        let scores = self.action_scores(observation, device);
         let scores = scores.as_slice::<f32>().expect("DQN scores are f32");
 
         view.legal_actions
@@ -117,6 +121,52 @@ impl Network {
             .map(|(action, _)| action)
             .expect("a DQN decision has a scored legal action")
     }
+
+    pub fn sample_action(
+        &self,
+        view: &PlayerView<'_>,
+        observation: &Observation,
+        device: &Device,
+        temperature: f64,
+        rng: &mut impl Rng,
+    ) -> Result<Action> {
+        let scores = self.action_scores(observation, device);
+        let scores = scores.as_slice::<f32>().expect("DQN scores are f32");
+        sample_legal_action(&view.legal_actions, scores, temperature, rng)
+    }
+
+    fn action_scores(&self, observation: &Observation, device: &Device) -> TensorData {
+        self.forward(std::iter::once(observation), device)
+            .into_data()
+    }
+}
+
+fn sample_legal_action(
+    actions: &[Action],
+    scores: &[f32],
+    temperature: f64,
+    rng: &mut impl Rng,
+) -> Result<Action> {
+    let candidates: Vec<_> = actions
+        .iter()
+        .filter_map(|&action| action_index(action).map(|index| (action, f64::from(scores[index]))))
+        .collect();
+    if candidates.iter().any(|&(_, score)| !score.is_finite()) {
+        return Err("DQN produced a non-finite score for a legal action".into());
+    }
+
+    let best = candidates
+        .iter()
+        .map(|&(_, score)| score)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let weights = WeightedIndex::new(
+        candidates
+            .iter()
+            .map(|&(_, score)| ((score - best) / temperature).exp()),
+    )
+    .map_err(|error| format!("could not sample a legal DQN action: {error}"))?;
+
+    Ok(candidates[weights.sample(rng)].0)
 }
 
 pub struct GreedyPolicy<'a> {
@@ -134,5 +184,38 @@ impl Policy for GreedyPolicy<'_> {
                     .greedy_action(view, &Observation::new(view), self.device),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+    use sequence_game::{Game, GameConfig, Player};
+
+    use super::*;
+
+    #[test]
+    fn temperature_weights_only_legal_scores_and_stays_stable_at_low_temperature() {
+        let game = Game::new(GameConfig {
+            shuffle_seed: 0,
+            starting_player: Player::One,
+            policies: Default::default(),
+        });
+        let view = game.view(Player::One);
+        let actions = &view.legal_actions[..2];
+        let [best, other] = [actions[0], actions[1]];
+        let mut scores = [f32::MAX; ACTIONS];
+        scores[action_index(best).unwrap()] = 1.0;
+        scores[action_index(other).unwrap()] = 0.0;
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+
+        let selected = sample_legal_action(actions, &scores, f64::MIN_POSITIVE, &mut rng).unwrap();
+        assert_eq!(selected, best);
+
+        let best_count = (0..1000)
+            .filter(|_| sample_legal_action(actions, &scores, 1.0, &mut rng).unwrap() == best)
+            .count();
+        assert!((680..780).contains(&best_count));
     }
 }

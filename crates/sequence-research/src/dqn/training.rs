@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::{Result, experiment::GameEnd};
 
 use super::{
-    Config, Target,
+    Config, Exploration, Target,
     model::Network,
     observation::{ACTIONS, Observation, action_index, legal_mask},
 };
@@ -30,15 +30,12 @@ struct Decision {
 impl Decision {
     fn new(view: &PlayerView<'_>, label_wins: bool) -> Self {
         let mut winning_actions = Vec::new();
-        if label_wins && view.legal_actions.len() > 1 {
+        if label_wins {
             winning_actions.extend(view.legal_actions.iter().filter_map(|&action| {
                 view.preview_play(action)
                     .filter(|preview| preview.wins)
                     .and_then(|_| action_index(action))
             }));
-            if winning_actions.len() == view.legal_actions.len() {
-                winning_actions.clear();
-            }
         }
 
         Self {
@@ -66,10 +63,13 @@ pub struct Episode {
     actions: usize,
     decisions: usize,
     updates: usize,
-    epsilon: f64,
+    epsilon: Option<f64>,
     reward: Option<f32>,
     opponent: &'static str,
     opponent_seed: Option<u64>,
+    temperature: Option<f64>,
+    immediate_win_opportunities: Option<usize>,
+    immediate_wins_taken: Option<usize>,
 }
 
 pub struct Learner {
@@ -84,6 +84,7 @@ pub struct Trainer<'a> {
     device: &'a Device,
     inference_device: &'a Device,
     training_device: Device,
+    exploration_schedule: Exploration,
     pub learner: Learner,
     learner_policy: Option<Network>,
     opponent: Network,
@@ -98,7 +99,12 @@ pub struct Trainer<'a> {
 }
 
 impl<'a> Trainer<'a> {
-    pub fn new(config: &'a Config, device: &'a Device, inference_device: &'a Device) -> Self {
+    pub fn new(
+        config: &'a Config,
+        exploration_schedule: Exploration,
+        device: &'a Device,
+        inference_device: &'a Device,
+    ) -> Self {
         device.seed(config.seed);
         let training_device = device.clone().autodiff();
         let online = Network::new(&training_device);
@@ -112,6 +118,7 @@ impl<'a> Trainer<'a> {
             device,
             inference_device,
             training_device,
+            exploration_schedule,
             opponent: online.valid().to_device(inference_device),
             learner_policy: None,
             learner: Learner {
@@ -174,6 +181,9 @@ impl<'a> Trainer<'a> {
             false,
         );
 
+        let label_wins = self.config.immediate_win_loss_weight.unwrap_or_default() > 0.0;
+        let mut immediate_win_opportunities = 0;
+        let mut immediate_wins_taken = 0;
         let mut pending = None;
         while let Some(view) = game.active_view() {
             let actor = view.player;
@@ -191,10 +201,7 @@ impl<'a> Trainer<'a> {
                     ),
                 }
             } else {
-                let decision = Rc::new(Decision::new(
-                    &view,
-                    self.config.immediate_win_loss_weight.unwrap_or_default() > 0.0,
-                ));
+                let decision = Rc::new(Decision::new(&view, label_wins));
                 if let Some((state, action)) = pending.take() {
                     self.record(Experience {
                         state,
@@ -204,12 +211,11 @@ impl<'a> Trainer<'a> {
                     })?;
                 }
 
-                let action = if self.exploration.random::<f64>() < self.epsilon() {
-                    view.legal_actions[self.exploration.random_range(0..view.legal_actions.len())]
-                } else {
-                    self.greedy_learner_action(&view, &decision.observation)
-                };
-                pending = Some((decision, action_index(action).expect("scored action")));
+                let action = self.learner_action(&view, &decision.observation)?;
+                let index = action_index(action).expect("scored action");
+                immediate_win_opportunities += usize::from(!decision.winning_actions.is_empty());
+                immediate_wins_taken += usize::from(decision.winning_actions.contains(&index));
+                pending = Some((decision, index));
                 self.decisions += 1;
                 action
             };
@@ -232,6 +238,12 @@ impl<'a> Trainer<'a> {
             })?;
         }
 
+        let (epsilon, temperature) = match self.exploration_schedule {
+            Exploration::Epsilon(schedule) => (Some(schedule.at(self.decisions)), None),
+            Exploration::Temperature(schedule) => {
+                (None, Some(schedule.temperature_at(self.decisions)))
+            }
+        };
         let row = Episode {
             episode,
             shuffle_seed,
@@ -241,10 +253,13 @@ impl<'a> Trainer<'a> {
             actions: game.action_count(),
             decisions: self.decisions,
             updates: self.learner.updates,
-            epsilon: self.epsilon(),
+            epsilon,
             reward,
             opponent,
             opponent_seed,
+            temperature,
+            immediate_win_opportunities: label_wins.then_some(immediate_win_opportunities),
+            immediate_wins_taken: label_wins.then_some(immediate_wins_taken),
         };
         if episode.is_multiple_of(self.config.opponent_update_every.get()) {
             self.opponent = self.learner.online.valid().to_device(self.inference_device);
@@ -253,30 +268,46 @@ impl<'a> Trainer<'a> {
         Ok(row)
     }
 
-    fn greedy_learner_action(
+    fn learner_action(
         &mut self,
         view: &PlayerView<'_>,
         observation: &Observation,
-    ) -> Action {
-        if self.device == self.inference_device {
-            return self
-                .learner
-                .online
-                .valid()
-                .greedy_action(view, observation, self.device);
+    ) -> Result<Action> {
+        let temperature = match self.exploration_schedule {
+            Exploration::Epsilon(schedule) => {
+                if self.exploration.random::<f64>() < schedule.at(self.decisions) {
+                    return Ok(view.legal_actions
+                        [self.exploration.random_range(0..view.legal_actions.len())]);
+                }
+                None
+            }
+            Exploration::Temperature(schedule) => {
+                if let [action] = view.legal_actions.as_slice() {
+                    return Ok(*action);
+                }
+                Some(schedule.temperature_at(self.decisions))
+            }
+        };
+
+        let online;
+        let policy = if self.device == self.inference_device {
+            online = self.learner.online.valid();
+            &online
+        } else {
+            // Copy the updated weights only when the learner next needs network scores.
+            self.learner_policy
+                .get_or_insert_with(|| self.learner.online.valid().to_device(self.inference_device))
+        };
+        match temperature {
+            Some(temperature) => policy.sample_action(
+                view,
+                observation,
+                self.inference_device,
+                temperature,
+                &mut self.exploration,
+            ),
+            None => Ok(policy.greedy_action(view, observation, self.inference_device)),
         }
-
-        // Copy the updated weights only when the learner next needs a greedy action.
-        let policy = self
-            .learner_policy
-            .get_or_insert_with(|| self.learner.online.valid().to_device(self.inference_device));
-        policy.greedy_action(view, observation, self.inference_device)
-    }
-
-    fn epsilon(&self) -> f64 {
-        let duration = self.config.epsilon_decay_decisions.get();
-        let progress = self.decisions.min(duration) as f64 / duration as f64;
-        self.config.epsilon_start + progress * (self.config.epsilon_end - self.config.epsilon_start)
     }
 
     fn record(&mut self, experience: Experience) -> Result<()> {
@@ -418,20 +449,21 @@ fn immediate_win_loss<'a>(
         if state.winning_actions.is_empty() {
             continue;
         }
-        rows.push(row as i32);
-
         let mut wins = [false; ACTIONS];
         for &action in &state.winning_actions {
             wins[action] = true;
         }
+        let other = state
+            .legal
+            .iter()
+            .zip(&wins)
+            .map(|(&legal, &wins)| legal && !wins);
+        if !other.clone().any(|alternative| alternative) {
+            continue;
+        }
+        rows.push(row as i32);
         winning.extend_from_slice(&wins);
-        alternatives.extend(
-            state
-                .legal
-                .iter()
-                .zip(wins)
-                .map(|(&legal, wins)| legal && !wins),
-        );
+        alternatives.extend(other);
     }
     if rows.is_empty() {
         return None;
@@ -485,10 +517,10 @@ mod tests {
             "../../../../experiments/double-dqn-mixed-full.json"
         ))
         .unwrap();
-        config.validate().unwrap();
+        let exploration = config.validate().unwrap();
         config.action_limit = 8.try_into().unwrap();
         let device = Device::flex();
-        let mut trainer = Trainer::new(&config, &device, &device);
+        let mut trainer = Trainer::new(&config, exploration, &device, &device);
 
         for block in 0..2 {
             let mut heuristic_games = 0;
