@@ -80,6 +80,8 @@ enum Command {
         #[command(flatten)]
         options: dqn::EvaluationOptions,
     },
+    /// Compare saved DQN runs on shared deals and export an SVG evaluation report
+    EvaluateDqnSuite(dqn::suite::Options),
     /// Rank tactical actions on identical held-out positions across saved runs
     ProbeDqn(dqn::probe::Options),
     /// Open a local browser to filter and replay games from a run
@@ -113,6 +115,7 @@ fn main() -> ExitCode {
             device,
             options,
         } => dqn::evaluate_checkpoint(&checkpoint, &config, device, options),
+        Command::EvaluateDqnSuite(options) => dqn::suite::run(options),
         Command::ProbeDqn(options) => dqn::probe::run(options),
         Command::Inspect {
             run,

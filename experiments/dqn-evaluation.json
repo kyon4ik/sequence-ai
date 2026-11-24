@@ -1,0 +1,18 @@
+{
+  "runs_directory": "results/experiments",
+  "arms": [
+    {"directory": "double-dqn-mixed-full", "label": "20% Heuristic"},
+    {"directory": "double-dqn-half-heuristic-full", "label": "50% Heuristic"},
+    {"directory": "double-dqn-immediate-win-full", "label": "Immediate-win loss"},
+    {"directory": "double-dqn-temperature-full", "label": "Immediate-win loss + temperature"}
+  ],
+  "seeds": [42, 43, 44],
+  "checkpoint_percent": 20,
+  "device": "cpu",
+  "action_limit": 512,
+  "validation": {"first_shuffle_seed": 14000000, "deal_count": 128, "policy_seed": 2043},
+  "holdout": {"first_shuffle_seed": 15000000, "deal_count": 256, "policy_seed": 2044},
+  "tactics": {"first_shuffle_seed": 16000000, "deal_count": 256, "policy_seed": 2045},
+  "bootstrap_seed": 20261124,
+  "bootstrap_replicates": 10000
+}

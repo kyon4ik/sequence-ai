@@ -27,16 +27,16 @@ use super::{
 pub struct Options {
     /// Count turns with a legal first-sequence or immediate winning move and how often it is taken
     #[arg(long)]
-    tactics: bool,
+    pub(super) tactics: bool,
     /// Take an immediate win when available and report tactical counts
     #[arg(long)]
-    take_immediate_wins: bool,
+    pub(super) take_immediate_wins: bool,
     /// Write one row per deal, seat, and opponent to a new CSV
     #[arg(long)]
     pub(super) games: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, Default, Serialize)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
 struct Tactics {
     take_immediate_wins: bool,
     first_sequence_opportunities: usize,
@@ -95,7 +95,7 @@ impl Policy for EvaluationPolicy<'_> {
     }
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 pub struct Totals {
     pub opponent: AgentKind,
     pub wins: usize,
@@ -126,6 +126,14 @@ struct Summary<'a> {
     latest_evaluation: &'a [Checkpoint],
 }
 
+#[derive(Clone, Copy, Serialize)]
+pub(super) struct GameRow {
+    pub shuffle_seed: u64,
+    pub learner_seat: usize,
+    pub opponent: AgentKind,
+    pub outcome: GameEnd,
+}
+
 pub(super) fn evaluate(
     network: &Network,
     device: &Device,
@@ -133,19 +141,32 @@ pub(super) fn evaluate(
     action_limit: NonZeroUsize,
     options: Options,
 ) -> Result<[Totals; 2]> {
-    #[derive(Serialize)]
-    struct GameRow {
-        shuffle_seed: u64,
-        learner_seat: usize,
-        opponent: AgentKind,
-        outcome: GameEnd,
-    }
     let mut games = options
         .games
         .as_deref()
         .map(fs::File::create_new)
         .transpose()?
         .map(csv::Writer::from_writer);
+    let totals = evaluate_with_games(network, device, settings, action_limit, &options, |game| {
+        if let Some(writer) = &mut games {
+            writer.serialize(game)?;
+        }
+        Ok(())
+    })?;
+    if let Some(writer) = &mut games {
+        writer.flush()?;
+    }
+    Ok(totals)
+}
+
+pub(super) fn evaluate_with_games(
+    network: &Network,
+    device: &Device,
+    settings: &Evaluation,
+    action_limit: NonZeroUsize,
+    options: &Options,
+    mut game_row: impl FnMut(GameRow) -> Result<()>,
+) -> Result<[Totals; 2]> {
     let last = last_seed(settings.first_shuffle_seed, settings.deal_count)?;
     let mut evaluation = EvaluationConfig {
         policy_ids: ["dqn".into(), String::new()],
@@ -171,18 +192,15 @@ pub(super) fn evaluate(
             },
             |seed| opponent.build(seed),
         )?;
-        if let Some(writer) = &mut games {
-            for pair in &report.pairs {
-                for (seat, game) in pair.iter().enumerate() {
-                    writer.serialize(GameRow {
-                        shuffle_seed: game.config.game.shuffle_seed,
-                        learner_seat: seat + 1,
-                        opponent,
-                        outcome: game.end.into(),
-                    })?;
-                }
+        for pair in &report.pairs {
+            for (seat, game) in pair.iter().enumerate() {
+                game_row(GameRow {
+                    shuffle_seed: game.config.game.shuffle_seed,
+                    learner_seat: seat + 1,
+                    opponent,
+                    outcome: game.end.into(),
+                })?;
             }
-            writer.flush()?;
         }
         let [wins, losses] = report.totals.wins;
         let draws = report.totals.draws;

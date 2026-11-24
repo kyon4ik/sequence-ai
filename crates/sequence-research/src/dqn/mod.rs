@@ -3,6 +3,7 @@ mod model;
 mod observation;
 pub mod probe;
 mod snapshot;
+pub mod suite;
 mod training;
 
 use std::{

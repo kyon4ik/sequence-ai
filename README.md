@@ -32,8 +32,8 @@ cargo build --release --locked -p sequence-research
 ## Run a matchup and inspect games
 
 ```text
-cargo run --release --locked -p sequence-research -- run experiments/random-vs-heuristic.json --output results/quick-match
-cargo run --release --locked -p sequence-research -- inspect results/quick-match --no-open
+cargo run --release --locked -p sequence-research -- run experiments/random-vs-heuristic.json --output results/experiments/quick-match
+cargo run --release --locked -p sequence-research -- inspect results/experiments/quick-match --no-open
 ```
 
 Open the printed local address in your browser. The viewer filters games and replays their actions. Press Ctrl+C in the terminal to stop it. The run also saves `config.json`, `games.csv`, `summary.json`, and SVG plots. Use a new output path for each run.
@@ -43,14 +43,14 @@ Open the printed local address in your browser. The viewer filters games and rep
 Start with the one-episode CPU smoke test. It uses an eight-action limit, so cutoffs are expected. Training writes a checkpoint at initialization and at the end.
 
 ```text
-cargo run --release --locked -p sequence-research -- train-dqn crates/sequence-research/tests/fixtures/dqn.json --output results/dqn-smoke
-cargo run --release --locked -p sequence-research -- evaluate-dqn results/dqn-smoke/checkpoints/episode-000001.bpk crates/sequence-research/tests/fixtures/dqn.json --device cpu --tactics
+cargo run --release --locked -p sequence-research -- train-dqn crates/sequence-research/tests/fixtures/dqn.json --output results/dqn-smoke/seed-42
+cargo run --release --locked -p sequence-research -- evaluate-dqn results/dqn-smoke/seed-42/checkpoints/episode-000001.bpk crates/sequence-research/tests/fixtures/dqn.json --device cpu --tactics
 ```
 
 For a full CPU run, use an experiment preset and override its training device. Copy the JSON and reduce `episodes` and `evaluation.deal_count` if you want an intermediate check before committing to a long run. Keep `inference_device` set to `"cpu"` or omit it on CPU-only machines.
 
 ```text
-cargo run --release --locked -p sequence-research -- train-dqn experiments/double-dqn-immediate-win-full.json --device cpu --seed 42 --output results/supervised-cpu-s42
+cargo run --release --locked -p sequence-research -- train-dqn experiments/double-dqn-immediate-win-full.json --device cpu --seed 42 --output results/experiments/supervised-cpu/seed-42
 ```
 
 ### Optional NVIDIA CUDA training
@@ -60,8 +60,8 @@ The recent research runs used NVIDIA CUDA on Linux with CPU inference. Install a
 ```text
 nvidia-smi
 nvcc --version
-cargo run --release --locked -p sequence-research --features cuda -- train-dqn crates/sequence-research/tests/fixtures/dqn.json --device cuda --output results/dqn-cuda-smoke
-cargo run --release --locked -p sequence-research --features cuda -- train-dqn experiments/double-dqn-immediate-win-full.json --seed 42 --output results/supervised-cuda-s42
+cargo run --release --locked -p sequence-research --features cuda -- train-dqn crates/sequence-research/tests/fixtures/dqn.json --device cuda --output results/dqn-cuda-smoke/seed-42
+cargo run --release --locked -p sequence-research --features cuda -- train-dqn experiments/double-dqn-immediate-win-full.json --seed 42 --output results/experiments/supervised-cuda/seed-42
 ```
 
 Use a separate output directory per seed.
@@ -74,8 +74,8 @@ Use a separate output directory per seed.
 - `probe-dqn` scans the saved checkpoints in its run directories and prints tactical action ranks on a common set of positions. The replay viewer takes directories produced by `run`.
 
 ```text
-cargo run --release --locked -p sequence-research -- evaluate-dqn results/supervised-cuda-s42/checkpoints/episode-051200.bpk experiments/next-holdout.json --device cpu --tactics --games results/supervised-cuda-s42/holdout-games.csv
-cargo run --release --locked -p sequence-research -- probe-dqn results/supervised-cuda-s42 --device cpu --first-shuffle-seed 13000000 --deals 256 --policy-seed 2029
+cargo run --release --locked -p sequence-research -- evaluate-dqn results/experiments/supervised-cuda/seed-42/checkpoints/episode-051200.bpk experiments/next-holdout.json --device cpu --tactics --games results/experiments/supervised-cuda/seed-42/holdout-games.csv
+cargo run --release --locked -p sequence-research -- probe-dqn results/experiments/supervised-cuda/seed-42 --device cpu --first-shuffle-seed 13000000 --deals 256 --policy-seed 2029
 ```
 
 Use the path of your own run if you trained on CPU or used a different name. Run any subcommand with `--help` to see its options.

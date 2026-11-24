@@ -1,13 +1,17 @@
-use std::{fs, io, num::NonZeroUsize, path::PathBuf};
+use std::{
+    fs, io,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 
 use burn::tensor::Device;
 use clap::Args;
 use sequence_agents::{Policy, RandomAgent};
 use sequence_game::{Game, GameConfig, Player};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
-    Backend, last_seed,
+    Backend, Evaluation, last_seed,
     model::Network,
     observation::{ACTIONS, Observation, action_index},
 };
@@ -29,27 +33,41 @@ pub struct Options {
     device: Backend,
 }
 
-struct Position {
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Tactic {
+    ImmediateWin,
+    FirstSequence,
+}
+
+pub(super) const TACTICS: [Tactic; 2] = [Tactic::ImmediateWin, Tactic::FirstSequence];
+
+pub(super) struct Position {
     deal: u64,
     turn: usize,
     seat: usize,
-    tactic: &'static str,
+    tactic: Tactic,
     observation: Observation,
     candidates: Vec<(usize, bool)>,
 }
 
-fn positions(options: &Options) -> Result<Vec<Position>> {
+pub(super) fn positions(
+    settings: &Evaluation,
+    action_limit: NonZeroUsize,
+) -> Result<Vec<Position>> {
     let mut positions = Vec::new();
-    for deal in options.first_shuffle_seed..=last_seed(options.first_shuffle_seed, options.deals)? {
+    for deal in
+        settings.first_shuffle_seed..=last_seed(settings.first_shuffle_seed, settings.deal_count)?
+    {
         let mut game = Game::new(GameConfig {
             shuffle_seed: deal,
             starting_player: Player::One,
             policies: ["random".into(), "random".into()],
         });
         let mut agents: [RandomAgent; 2] = std::array::from_fn(|seat| {
-            let offset = (deal - options.first_shuffle_seed).wrapping_mul(2);
+            let offset = (deal - settings.first_shuffle_seed).wrapping_mul(2);
             RandomAgent::new(
-                options
+                settings
                     .policy_seed
                     .wrapping_add(offset)
                     .wrapping_add(seat as u64),
@@ -57,7 +75,7 @@ fn positions(options: &Options) -> Result<Vec<Position>> {
         });
         // Give each deal at most one vote per seat and tactic.
         let mut seen = [[false; 2]; 2];
-        for turn in 1..=512 {
+        for turn in 1..=action_limit.get() {
             let Some(actor) = game.current_player() else {
                 break;
             };
@@ -80,7 +98,7 @@ fn positions(options: &Options) -> Result<Vec<Position>> {
                         ))
                     })
                     .collect();
-                for (i, tactic) in ["immediate_win", "first_sequence"].into_iter().enumerate() {
+                for (i, tactic) in TACTICS.into_iter().enumerate() {
                     if !seen[seat][i]
                         && actions.iter().any(|(_, label)| label[i])
                         && actions.iter().any(|(_, label)| !label[i])
@@ -107,20 +125,35 @@ fn positions(options: &Options) -> Result<Vec<Position>> {
     Ok(positions)
 }
 
-#[derive(Serialize)]
-struct Score<'a> {
-    run: &'a std::path::Path,
-    episode: usize,
+#[derive(Deserialize, Serialize)]
+pub(super) struct Score {
+    pub run: PathBuf,
+    pub episode: usize,
     shuffle_seed: u64,
     action_number: usize,
     seat: usize,
-    tactic: &'a str,
+    pub tactic: Tactic,
     legal_actions: usize,
     tactical_actions: usize,
-    best_tactical_rank: usize,
+    pub best_tactical_rank: usize,
     best_tactical_q: f32,
     best_alternative_q: f32,
     gap: f32,
+}
+
+impl Score {
+    pub(super) fn matches_position(&self, position: &Position) -> bool {
+        self.shuffle_seed == position.deal
+            && self.action_number == position.turn
+            && self.seat == position.seat
+            && self.tactic == position.tactic
+            && self.legal_actions == position.candidates.len()
+            && self.tactical_actions == position.candidates.iter().filter(|(_, t)| *t).count()
+            && (1..=self.legal_actions).contains(&self.best_tactical_rank)
+            && self.best_tactical_q.is_finite()
+            && self.best_alternative_q.is_finite()
+            && self.gap == self.best_tactical_q - self.best_alternative_q
+    }
 }
 
 struct Ranking {
@@ -140,14 +173,14 @@ fn rank_actions(scores: &[f32], candidates: &mut [(usize, bool)]) -> Option<Rank
     })
 }
 
-fn score(
+pub(super) fn score(
     network: &Network,
     device: &Device,
     positions: &[Position],
-    run: &std::path::Path,
+    run: &Path,
     episode: usize,
-    writer: &mut csv::Writer<impl io::Write>,
-) -> Result<()> {
+) -> Result<Vec<Score>> {
+    let mut results = Vec::with_capacity(positions.len());
     for batch in positions.chunks(64) {
         let data = network
             .forward(batch.iter().map(|p| &p.observation), device)
@@ -166,8 +199,8 @@ fn score(
                 best_alternative_q,
             } = rank_actions(scores, &mut ranked)
                 .expect("probe includes a tactic and an alternative");
-            writer.serialize(Score {
-                run,
+            results.push(Score {
+                run: run.to_owned(),
                 episode,
                 shuffle_seed: p.deal,
                 action_number: p.turn,
@@ -179,14 +212,19 @@ fn score(
                 best_tactical_q,
                 best_alternative_q,
                 gap: best_tactical_q - best_alternative_q,
-            })?;
+            });
         }
     }
-    Ok(())
+    Ok(results)
 }
 
 pub fn run(options: Options) -> Result<()> {
-    let positions = positions(&options)?;
+    let settings = Evaluation {
+        first_shuffle_seed: options.first_shuffle_seed,
+        deal_count: options.deals,
+        policy_seed: options.policy_seed,
+    };
+    let positions = positions(&settings, NonZeroUsize::new(512).unwrap())?;
     let device = options.device.device()?;
     let mut writer = csv::Writer::from_writer(io::stdout().lock());
     for run in &options.runs {
@@ -208,14 +246,15 @@ pub fn run(options: Options) -> Result<()> {
         }
         checkpoints.sort();
         for (episode, path) in checkpoints {
-            score(
+            for result in score(
                 &Network::load(&path, &device)?,
                 &device,
                 &positions,
                 run,
                 episode,
-                &mut writer,
-            )?;
+            )? {
+                writer.serialize(result)?;
+            }
         }
         writer.flush()?;
     }
