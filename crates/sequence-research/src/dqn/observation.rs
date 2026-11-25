@@ -1,4 +1,6 @@
-use sequence_game::{Action, BOARD_SIZE, Card, PlayerView, Position, Rank, Space};
+use sequence_game::{
+    Action, BOARD_SIZE, Card, PLAY_HISTORY_LENGTH, PlayerView, Position, Rank, Space,
+};
 use serde::{Deserialize, Serialize};
 
 pub const BOARD_CHANNELS: usize = 5;
@@ -9,6 +11,7 @@ const NON_JACK_RANKS: usize = 12;
 const SUITS: usize = 4;
 
 pub const CONTEXT_FEATURES: usize = 3 * CARDS + 6;
+pub const HISTORY_FEATURES: usize = PLAY_HISTORY_LENGTH * (CARDS + SQUARES);
 pub const ACTIONS: usize = (1 + SUITS) * PLAYABLE_SQUARES + SUITS * NON_JACK_RANKS;
 
 pub fn action_index(action: Action) -> Option<usize> {
@@ -57,10 +60,12 @@ pub struct Observation {
     pub board: [f32; BOARD_CHANNELS * SQUARES],
     #[serde(with = "super::snapshot::array")]
     pub features: [f32; CONTEXT_FEATURES],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recent_plays: Option<[Option<(usize, usize)>; PLAY_HISTORY_LENGTH]>,
 }
 
 impl Observation {
-    pub fn new(view: &PlayerView<'_>) -> Self {
+    pub fn new(view: &PlayerView<'_>, include_history: bool) -> Self {
         let player = view.player;
         let own = player.index();
         let other = player.opponent().index();
@@ -112,6 +117,22 @@ impl Observation {
         Self {
             board: std::array::from_fn(|index| planes[index / SQUARES][index % SQUARES]),
             features,
+            recent_plays: include_history.then(|| {
+                view.opponent_plays
+                    .map(|play| play.map(|play| (card_index(play.card), square_index(play.target))))
+            }),
+        }
+    }
+
+    pub fn write_history(&self, features: &mut [f32]) {
+        if let Some(plays) = &self.recent_plays {
+            let (slots, _) = features.as_chunks_mut::<{ CARDS + SQUARES }>();
+            for (slot, play) in slots.iter_mut().zip(plays) {
+                if let Some((card, target)) = *play {
+                    slot[card] = 1.0;
+                    slot[CARDS + target] = 1.0;
+                }
+            }
         }
     }
 }

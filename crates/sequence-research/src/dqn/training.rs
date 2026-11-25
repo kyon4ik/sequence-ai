@@ -35,7 +35,7 @@ struct Decision {
 }
 
 impl Decision {
-    fn new(view: &PlayerView<'_>, label_wins: bool) -> Self {
+    fn new(view: &PlayerView<'_>, observation: Observation, label_wins: bool) -> Self {
         let mut winning_actions = Vec::new();
         if label_wins {
             winning_actions.extend(view.legal_actions.iter().filter_map(|&action| {
@@ -46,7 +46,7 @@ impl Decision {
         }
 
         Self {
-            observation: Observation::new(view),
+            observation,
             legal: legal_mask(view),
             winning_actions,
         }
@@ -132,7 +132,7 @@ impl<'a> Trainer<'a> {
     ) -> Self {
         device.seed(config.seed);
         let training_device = device.clone().autodiff();
-        let online = Network::new(&training_device);
+        let online = Network::new(&training_device, config.move_history);
         let mut sampling = ChaCha8Rng::seed_from_u64(config.seed);
         sampling.set_stream(1);
         let mut opponent_rng = ChaCha8Rng::seed_from_u64(config.seed);
@@ -281,12 +281,13 @@ impl<'a> Trainer<'a> {
                         .ok_or("heuristic did not choose an action in an active match")?,
                     None => self.opponent.greedy_action(
                         &view,
-                        &Observation::new(&view),
+                        &self.opponent.observe(&view),
                         self.inference_device,
                     ),
                 }
             } else {
-                let decision = Rc::new(Decision::new(&view, label_wins));
+                let observation = self.learner.online.observe(&view);
+                let decision = Rc::new(Decision::new(&view, observation, label_wins));
                 if let Some((state, action)) = pending.take() {
                     self.record(Experience {
                         state,
@@ -657,7 +658,8 @@ mod tests {
             policies: Default::default(),
         });
         let decision = |winning_actions: Vec<usize>| {
-            let mut state = Decision::new(&game.view(Player::One), false);
+            let view = game.view(Player::One);
+            let mut state = Decision::new(&view, Observation::new(&view, false), false);
             state.legal = std::array::from_fn(|i| i < 3);
             state.winning_actions = winning_actions;
             state

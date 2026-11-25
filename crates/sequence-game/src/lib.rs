@@ -7,5 +7,6 @@ pub use board::{BOARD_SIZE, Board, Position, Space};
 pub use card::{Card, Rank, Suit};
 pub use claims::{SEQUENCE_LENGTH, Sequence};
 pub use game::{
-    Action, ActionError, Game, GameConfig, GameResult, Outcome, PlayPreview, Player, PlayerView,
+    Action, ActionError, CardPlay, Game, GameConfig, GameResult, Outcome, PLAY_HISTORY_LENGTH,
+    PlayPreview, Player, PlayerView,
 };

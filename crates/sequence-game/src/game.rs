@@ -8,6 +8,7 @@ use crate::{Board, Card, Position, Sequence, card::Effect, claims::new_claims};
 const HAND_SIZE: usize = 7;
 const SEQUENCES_TO_WIN: usize = 2;
 const PASSES_TO_DRAW: u8 = 3;
+pub const PLAY_HISTORY_LENGTH: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Player {
@@ -44,6 +45,12 @@ pub enum Action {
     Exchange(Card),
     Play { card: Card, target: Position },
     Pass,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CardPlay {
+    pub card: Card,
+    pub target: Position,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,6 +93,8 @@ pub struct PlayerView<'a> {
     pub board: &'a Board,
     pub claimed_sequences: [&'a [Sequence]; 2],
     pub discard_piles: [&'a [Card]; 2],
+    /// The opponent's most recent board plays, newest first, padded with `None`.
+    pub opponent_plays: &'a [Option<CardPlay>; PLAY_HISTORY_LENGTH],
     pub hand_sizes: [usize; 2],
     pub draw_pile_size: usize,
     pub current_player: Option<Player>,
@@ -130,6 +139,7 @@ pub struct Game {
     hands: [Vec<Card>; 2],
     claimed: [Vec<Sequence>; 2],
     discards: [Vec<Card>; 2],
+    recent_plays: [[Option<CardPlay>; PLAY_HISTORY_LENGTH]; 2],
     draw_pile: VecDeque<Card>,
     rng: ChaCha8Rng,
     current_player: Player,
@@ -152,6 +162,7 @@ impl Game {
             hands,
             claimed: Default::default(),
             discards: Default::default(),
+            recent_plays: Default::default(),
             draw_pile,
             rng,
             exchanged_this_turn: false,
@@ -172,6 +183,7 @@ impl Game {
             board: &self.board,
             claimed_sequences: self.claimed.each_ref().map(Vec::as_slice),
             discard_piles: self.discards.each_ref().map(Vec::as_slice),
+            opponent_plays: &self.recent_plays[player.opponent().index()],
             hand_sizes: self.hands.each_ref().map(Vec::len),
             draw_pile_size: self.draw_pile.len(),
             current_player,
@@ -299,6 +311,9 @@ impl Game {
 
     fn play_card(&mut self, card: Card, target: Position) {
         let player = self.current_player;
+        let recent = &mut self.recent_plays[player.index()];
+        recent.rotate_right(1);
+        recent[0] = Some(CardPlay { card, target });
         self.consecutive_passes = 0;
 
         let claimed = &mut self.claimed[player.index()];

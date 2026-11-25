@@ -23,7 +23,7 @@ use crate::Result;
 
 use self::{
     evaluation::{Checkpoint, evaluate},
-    model::Network,
+    model::{MoveHistory, Network},
     snapshot::{LogOffsets, Metadata},
     training::Trainer,
 };
@@ -120,6 +120,8 @@ struct Config {
     heuristic_opponent_every: Option<NonZeroUsize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     immediate_win_loss_weight: Option<f32>,
+    #[serde(default, skip_serializing_if = "MoveHistory::is_disabled")]
+    move_history: MoveHistory,
     checkpoint_every: NonZeroUsize,
     evaluation: Evaluation,
 }
@@ -404,14 +406,8 @@ fn train_run(
 ) -> Result<()> {
     let model = trainer.learner.online.parameter_counts();
     let checkpoint = |episode, trainer: &Trainer<'_>, logs: &mut TrainingLogs| -> Result<()> {
-        let online = trainer
-            .learner
-            .online
-            .valid()
-            .into_record()
-            .into_bytes()?
-            .shared();
-        let network = Network::new(inference_device)
+        let online = trainer.learner.online.checkpoint()?.shared();
+        let network = Network::new(inference_device, config.move_history)
             .try_load_record(ModuleRecord::from_bytes(online.clone())?)?
             .valid();
 

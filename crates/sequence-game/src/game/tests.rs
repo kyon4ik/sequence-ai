@@ -141,6 +141,37 @@ fn card_effects_validate_turn_card_and_target() {
 }
 
 #[test]
+fn view_keeps_only_the_opponents_four_latest_board_plays() {
+    let mut game = Game::new(config(Player::One));
+    let mut played = [Vec::new(), Vec::new()];
+    for _ in 0..12 {
+        let player = game.current_player().unwrap();
+        let view = game.view(player);
+        let expected: Vec<_> = played[player.opponent().index()]
+            .iter()
+            .rev()
+            .take(PLAY_HISTORY_LENGTH)
+            .copied()
+            .map(Some)
+            .chain(std::iter::repeat(None))
+            .take(PLAY_HISTORY_LENGTH)
+            .collect();
+        assert_eq!(view.opponent_plays.as_slice(), expected);
+
+        let Action::Play { card, target } = view
+            .legal_actions
+            .into_iter()
+            .find(|action| matches!(action, Action::Play { .. }))
+            .unwrap()
+        else {
+            unreachable!();
+        };
+        game.apply(player, Action::Play { card, target }).unwrap();
+        played[player.index()].push(CardPlay { card, target });
+    }
+}
+
+#[test]
 fn exchange_can_precede_a_legal_play_and_replenishes_from_both_discards() {
     let mut game = Game::new(config(Player::One));
     game.hands[0] = vec![ACE, WILD];
@@ -167,6 +198,10 @@ fn exchange_can_precede_a_legal_play_and_replenishes_from_both_discards() {
 
     game.apply(Player::One, Action::Exchange(ACE)).unwrap();
     let view = game.view(Player::One);
+    assert_eq!(
+        game.view(Player::Two).opponent_plays,
+        &[None; PLAY_HISTORY_LENGTH]
+    );
     assert_eq!(view.current_player, Some(Player::One));
     assert_eq!(view.consecutive_passes, 1);
     assert_eq!(view.hand, &[WILD, TWO]);
@@ -222,6 +257,14 @@ fn mandatory_exchange_allows_only_one_attempt_per_turn_and_three_passes_draw() {
     }
 
     assert_eq!(game.view(Player::One).consecutive_passes, 3);
+    assert_eq!(
+        game.view(Player::One).opponent_plays,
+        &[None; PLAY_HISTORY_LENGTH]
+    );
+    assert_eq!(
+        game.view(Player::Two).opponent_plays,
+        &[None; PLAY_HISTORY_LENGTH]
+    );
     assert_eq!(game.current_player(), None);
     assert_eq!(
         game.result(),

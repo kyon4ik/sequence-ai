@@ -8,6 +8,7 @@ cuda = ["burn/cuda"]
 
 [dependencies]
 burn = { version = "0.22.1", default-features = false, features = ["std", "flex", "optim", "rayon", "simd"] }
+burn-pack = "0.22.1"
 ciborium = "0.2"
 clap = { version = "4.6", features = ["derive"] }
 csv = "1.4"
@@ -24,6 +25,3 @@ sha2 = "0.10"
 statrs = { version = "0.18", default-features = false }
 tempfile = "3"
 tiny_http = "0.12"
-
-[dev-dependencies]
-burn-pack = "0.22.1"

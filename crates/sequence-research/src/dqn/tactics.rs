@@ -126,7 +126,7 @@ pub(super) fn positions(
                             turn,
                             seat: seat + 1,
                             tactic,
-                            observation: Observation::new(&view),
+                            observation: Observation::new(&view, true),
                             candidates: actions.iter().map(|(a, label)| (*a, label[i])).collect(),
                         });
                         seen[seat][i] = true;
