@@ -15,7 +15,7 @@ Win rates in the main comparisons use paired deals with both seats played. The f
 | **50% Heuristic opponents** | [Training config](../experiments/double-dqn-half-heuristic-full.json) · [Shared holdout](../experiments/next-holdout.json) | Increasing the Heuristic share from 20% to 50% moved the Heuristic holdout win rate from 15.5% to 13.7% (paired 95% CI −4.0 to +0.4 points). Random stayed near 90%. There was no clear gain. |
 | **Temperature-controlled exploration pilot** | [Temperature preset](../experiments/double-dqn-temperature-full.json) · [ε-greedy control preset](../experiments/double-dqn-immediate-win-full.json) | Seed 42 used immediate-win supervision in both arms. Near one million decisions, ε-greedy won 20.7% against Heuristic and 93.6% against Random. Temperature sampling won 11.3% and 88.3%, respectively. At 35,840 episodes the gap narrowed. Temperature reached 21.3% against Heuristic at 1.19 million decisions, and ε-greedy reached 22.3% at 1.13 million. This is one seed and one temperature schedule. |
 
-To reproduce the immediate-win rule comparison, use `evaluate-dqn` twice on each final baseline checkpoint with the shared holdout. Use `--tactics` for the greedy policy and `--take-immediate-wins` for the rule-assisted policy.
+To reproduce the immediate-win rule comparison, use `evaluate-dqn` twice on each final baseline checkpoint with the shared holdout. Give each evaluation a distinct `--output` directory. Use `--tactics` for the greedy policy and `--take-immediate-wins` for the rule-assisted policy.
 
 ### Reproduce the temperature pilot
 

@@ -1,9 +1,6 @@
-use std::{
-    cell::Cell,
-    fs,
-    num::NonZeroUsize,
-    path::{Path, PathBuf},
-};
+pub mod report;
+
+use std::{cell::Cell, fs, num::NonZeroUsize, path::Path};
 
 use burn::tensor::Device;
 use clap::Args;
@@ -23,17 +20,19 @@ use super::{
     model::{GreedyPolicy, Network, ParameterCounts},
 };
 
+pub(super) const OPPONENTS: [(AgentKind, &str); 2] = [
+    (AgentKind::Random, "Random"),
+    (AgentKind::Heuristic, "Heuristic"),
+];
+
 #[derive(Args, Default)]
-pub struct Options {
+pub(super) struct MatchOptions {
     /// Count turns with a legal first-sequence or immediate winning move and how often it is taken
     #[arg(long)]
     pub(super) tactics: bool,
     /// Take an immediate win when available and report tactical counts
     #[arg(long)]
     pub(super) take_immediate_wins: bool,
-    /// Write one row per deal, seat, and opponent to a new CSV
-    #[arg(long)]
-    pub(super) games: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
@@ -139,24 +138,15 @@ pub(super) fn evaluate(
     device: &Device,
     settings: &Evaluation,
     action_limit: NonZeroUsize,
-    options: Options,
 ) -> Result<[Totals; 2]> {
-    let mut games = options
-        .games
-        .as_deref()
-        .map(fs::File::create_new)
-        .transpose()?
-        .map(csv::Writer::from_writer);
-    let totals = evaluate_with_games(network, device, settings, action_limit, &options, |game| {
-        if let Some(writer) = &mut games {
-            writer.serialize(game)?;
-        }
-        Ok(())
-    })?;
-    if let Some(writer) = &mut games {
-        writer.flush()?;
-    }
-    Ok(totals)
+    evaluate_with_games(
+        network,
+        device,
+        settings,
+        action_limit,
+        &MatchOptions::default(),
+        |_| Ok(()),
+    )
 }
 
 pub(super) fn evaluate_with_games(
@@ -164,7 +154,7 @@ pub(super) fn evaluate_with_games(
     device: &Device,
     settings: &Evaluation,
     action_limit: NonZeroUsize,
-    options: &Options,
+    options: &MatchOptions,
     mut game_row: impl FnMut(GameRow) -> Result<()>,
 ) -> Result<[Totals; 2]> {
     let last = last_seed(settings.first_shuffle_seed, settings.deal_count)?;

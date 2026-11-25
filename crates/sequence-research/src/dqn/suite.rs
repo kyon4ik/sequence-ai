@@ -1,4 +1,3 @@
-mod figures;
 mod reuse;
 mod statistics;
 
@@ -21,17 +20,13 @@ use crate::{Result, experiment::AgentKind};
 
 use super::{
     Backend, Evaluation, SavedEvaluation,
-    evaluation::{self, Checkpoint, GameRow, Totals},
+    evaluation::{self, Checkpoint, GameRow, MatchOptions, OPPONENTS, Totals},
+    figures::{self, Axis, Curve, Series},
     last_seed,
     model::Network,
-    probe::{self, Score},
     read_config, snapshot,
+    tactics::{self, Score},
 };
-
-const OPPONENTS: [(AgentKind, &str); 2] = [
-    (AgentKind::Random, "Random"),
-    (AgentKind::Heuristic, "Heuristic"),
-];
 
 #[derive(Args)]
 pub struct Options {
@@ -147,7 +142,10 @@ pub fn run(options: Options) -> Result<()> {
         None => sample_targets(&runs, config.checkpoint_percent)?,
     };
     sample(&mut runs, &targets);
-    let positions = probe::positions(&config.tactics, config.action_limit)?;
+    let positions = tactics::positions(&config.tactics, config.action_limit)?;
+    if positions.is_empty() {
+        return Err("no tactical positions on the requested deals".into());
+    }
     let jobs = options.jobs.map_or_else(
         || match config.device {
             Backend::Cpu => std::thread::available_parallelism().map_or(1, NonZeroUsize::get),
@@ -195,12 +193,12 @@ pub fn run(options: Options) -> Result<()> {
             let network = Network::load(&checkpoint.path, &device)?;
             Ok(Validated {
                 matches: play(&network, &device, &config.validation, config.action_limit)?,
-                tactics: probe::score(
+                tactics: tactics::score(
                     &network,
                     &device,
                     &positions,
                     &run.directory,
-                    checkpoint.episode,
+                    Some(checkpoint.episode),
                 )?,
                 sha256: hashes[&id].clone(),
             })
@@ -456,7 +454,7 @@ fn play(
         device,
         panel,
         action_limit,
-        &evaluation::Options {
+        &MatchOptions {
             tactics: true,
             ..Default::default()
         },
@@ -492,6 +490,77 @@ struct Report<'a> {
 }
 
 impl Report<'_> {
+    fn write_figures(&self, directory: &Path) -> Result<()> {
+        figures::write_curves(
+            &directory.join("win-rates.svg"),
+            "Win rates across training",
+            &format!(
+                "{} shared validation deals · both seats · {} training seeds · small dots show individual seeds",
+                self.config.validation.deal_count,
+                self.config.seeds.len(),
+            ),
+            OPPONENTS.map(|(_, label)| label.to_owned()),
+            Axis::Decisions,
+            "Win rate (completed games)",
+            &self.curves(|panel, result| result.matches.totals[panel].win_rate),
+        )?;
+
+        let scores = &self.validation.values().next().unwrap().tactics;
+        figures::write_curves(
+            &directory.join("tactics.svg"),
+            "Tactical choices across training",
+            "Fixed positions from Random vs Random games · small dots show individual seeds",
+            tactics::TACTICS.map(|tactic| {
+                let count = tactics::counts(scores, tactic).positions;
+                format!("{} · {count} positions", tactic.label())
+            }),
+            Axis::Decisions,
+            "Tactical action ranked first",
+            &self.curves(|panel, result| {
+                tactics::counts(&result.tactics, tactics::TACTICS[panel]).rate()
+            }),
+        )
+    }
+
+    fn curves(&self, rate: impl Fn(usize, &Validated) -> Option<f64>) -> Vec<Series<'_>> {
+        self.config
+            .arms
+            .iter()
+            .enumerate()
+            .map(|(arm, definition)| {
+                let seeds: Vec<_> = self
+                    .runs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, run)| run.arm == arm)
+                    .collect();
+                let panels = std::array::from_fn(|panel| {
+                    let mut curve = Curve::default();
+                    for (point, &target) in self.targets.iter().enumerate() {
+                        let rates: Vec<_> = seeds
+                            .iter()
+                            .map(|&(index, run)| {
+                                let id = run.sampled[point]?;
+                                let value = rate(panel, &self.validation[&(index, id)])?;
+                                Some((run.checkpoints[id].decisions, value))
+                            })
+                            .collect();
+                        curve.samples.extend(rates.iter().flatten().copied());
+                        let mean = statistics::complete_mean(
+                            rates.iter().map(|rate| rate.map(|(_, value)| value)),
+                        );
+                        curve.line.push((target, mean));
+                    }
+                    curve
+                });
+                Series {
+                    label: &definition.label,
+                    panels,
+                }
+            })
+            .collect()
+    }
+
     fn write(
         &self,
         directory: &Path,
@@ -513,7 +582,7 @@ impl Report<'_> {
             "opponent",
             "outcome",
         ])?;
-        let mut tactics = csv::Writer::from_path(directory.join("tactical-positions.csv"))?;
+        let mut tactics = tactics::writer(&directory.join("tactical-positions.csv"))?;
 
         let mut reports = Vec::new();
         for (index, run) in self.runs.iter().enumerate() {
@@ -550,7 +619,7 @@ impl Report<'_> {
                     "target_decisions": self.targets.iter().zip(&run.sampled).filter_map(|(&target, &sampled)| (sampled == Some(id)).then_some(target)).collect::<Vec<_>>(),
                     "validation": validated.matches.totals,
                     "holdout": holdout.map(|result| result.totals),
-                    "tactics": probe::TACTICS.map(|name| statistics::tactical_counts(&validated.tactics, name)),
+                    "tactics": tactics::TACTICS.map(|name| tactics::counts(&validated.tactics, name)),
                 }));
             }
             reports.push(json!({
@@ -587,7 +656,7 @@ impl Report<'_> {
                 "holdout_comparisons": self.comparisons,
             }),
         )?;
-        figures::write(directory, self)?;
+        self.write_figures(directory)?;
         Ok(())
     }
 }

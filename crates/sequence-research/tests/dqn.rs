@@ -57,10 +57,13 @@ fn trains_and_evaluates_a_checkpoint_against_both_baselines() {
     let legacy_path = workspace.path().join("legacy.json");
     fs::write(&legacy_path, legacy_config.to_string()).unwrap();
 
+    let report = workspace.path().join("checkpoint-report");
     let evaluate = Command::new(executable)
         .arg("evaluate-dqn")
         .arg(directory.join("checkpoints/episode-000001.bpk"))
         .arg(&legacy_path)
+        .arg("--output")
+        .arg(&report)
         .output()
         .unwrap();
     assert!(
@@ -73,6 +76,25 @@ fn trains_and_evaluates_a_checkpoint_against_both_baselines() {
     assert_eq!(results[1]["opponent"], "heuristic");
     assert_eq!(results[0]["cutoffs"], 2);
     assert_eq!(results[1]["cutoffs"], 2);
+    let summary: Value =
+        serde_json::from_slice(&fs::read(report.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["checkpoints"][0]["evaluation"], results);
+    assert_eq!(summary["checkpoints"][0]["tactics"][0]["positions"], 0);
+    assert!(
+        fs::read_to_string(report.join("tactical-positions.csv"))
+            .unwrap()
+            .starts_with("run,episode,shuffle_seed,")
+    );
+    assert!(
+        fs::read_to_string(report.join("win-rates.svg"))
+            .unwrap()
+            .contains("Learner decisions")
+    );
+    assert!(
+        fs::read_to_string(report.join("tactics.svg"))
+            .unwrap()
+            .contains("0 positions")
+    );
 
     legacy_config["device"] = json!("cuda");
     legacy_config["inference_device"] = json!("cpu");
@@ -81,6 +103,8 @@ fn trains_and_evaluates_a_checkpoint_against_both_baselines() {
         .arg("evaluate-dqn")
         .arg(directory.join("checkpoints/episode-000001.bpk"))
         .arg(&legacy_path)
+        .arg("--output")
+        .arg(workspace.path().join("cpu-report"))
         .output()
         .unwrap();
     assert!(
@@ -89,6 +113,48 @@ fn trains_and_evaluates_a_checkpoint_against_both_baselines() {
         String::from_utf8_lossy(&evaluate_on_cpu.stderr)
     );
     assert_eq!(evaluate_on_cpu.stdout, evaluate.stdout);
+
+    legacy_config["action_limit"] = json!(256);
+    legacy_config["tactics"] =
+        json!({"first_shuffle_seed": 16000000, "deal_count": 1, "policy_seed": 2045});
+    fs::write(&legacy_path, legacy_config.to_string()).unwrap();
+    let run_report = workspace.path().join("run-report");
+    let games = workspace.path().join("games.csv");
+    run_successfully(
+        Command::new(executable)
+            .arg("evaluate-dqn")
+            .arg(&directory)
+            .arg(&legacy_path)
+            .arg("--output")
+            .arg(&run_report)
+            .arg("--games")
+            .arg(&games),
+    );
+    let mut tactics = csv::Reader::from_path(run_report.join("tactical-positions.csv")).unwrap();
+    let scores: Vec<_> = tactics.records().collect::<Result<_, _>>().unwrap();
+    assert!(!scores.is_empty());
+    let (initial, final_checkpoint) = scores.split_at(scores.len() / 2);
+    for (before, after) in initial.iter().zip(final_checkpoint) {
+        assert_eq!(&before[1], "0");
+        assert_eq!(&after[1], "1");
+        assert_eq!(&after[2], "16000000");
+        assert!(
+            before
+                .iter()
+                .skip(2)
+                .take(6)
+                .eq(after.iter().skip(2).take(6))
+        );
+    }
+    assert_eq!(initial.len(), final_checkpoint.len());
+    let match_data = fs::read_to_string(games).unwrap();
+    assert!(match_data.starts_with("episode,shuffle_seed,learner_seat,opponent,outcome\n"));
+    assert_eq!(match_data.lines().count(), 9);
+    assert!(
+        fs::read_to_string(run_report.join("tactics.svg"))
+            .unwrap()
+            .contains("Tactical action ranked first")
+    );
 }
 
 #[test]

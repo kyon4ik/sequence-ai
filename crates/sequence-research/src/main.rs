@@ -68,10 +68,10 @@ enum Command {
         #[arg(long)]
         episodes: Option<NonZeroUsize>,
     },
-    /// Evaluate a saved DQN checkpoint on the config's held-out deals
+    /// Evaluate a saved DQN checkpoint or training run and export an SVG report
     EvaluateDqn {
-        /// Saved .bpk checkpoint
-        checkpoint: PathBuf,
+        /// Saved .bpk checkpoint or training run directory
+        input: PathBuf,
         /// JSON training experiment config
         config: PathBuf,
         /// Override the evaluation device specified in the config
@@ -82,8 +82,6 @@ enum Command {
     },
     /// Compare saved DQN runs on shared deals and export an SVG evaluation report
     EvaluateDqnSuite(dqn::suite::Options),
-    /// Rank tactical actions on identical held-out positions across saved runs
-    ProbeDqn(dqn::probe::Options),
     /// Open a local browser to filter and replay games from a run
     Inspect {
         /// Directory produced by the run command
@@ -110,13 +108,12 @@ fn main() -> ExitCode {
         } => dqn::train(&config, output, device, seed),
         Command::ResumeDqn { run, episodes } => dqn::resume(&run, episodes),
         Command::EvaluateDqn {
-            checkpoint,
+            input,
             config,
             device,
             options,
-        } => dqn::evaluate_checkpoint(&checkpoint, &config, device, options),
+        } => dqn::evaluate_report(&input, &config, device, options),
         Command::EvaluateDqnSuite(options) => dqn::suite::run(options),
-        Command::ProbeDqn(options) => dqn::probe::run(options),
         Command::Inspect {
             run,
             game_id,

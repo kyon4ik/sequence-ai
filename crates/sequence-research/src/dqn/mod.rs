@@ -1,9 +1,10 @@
 mod evaluation;
+mod figures;
 mod model;
 mod observation;
-pub mod probe;
 mod snapshot;
 pub mod suite;
+mod tactics;
 mod training;
 
 use std::{
@@ -26,7 +27,7 @@ use self::{
     training::Trainer,
 };
 
-pub use evaluation::Options as EvaluationOptions;
+pub use evaluation::report::{Options as EvaluationOptions, run as evaluate_report};
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -418,7 +419,6 @@ fn train_run(
             inference_device,
             &config.evaluation,
             config.action_limit,
-            EvaluationOptions::default(),
         )? {
             let row = Checkpoint {
                 episode,
@@ -469,31 +469,5 @@ fn train_run(
         }
     }
     println!("Results saved to {}", output.display());
-    Ok(())
-}
-
-pub fn evaluate_checkpoint(
-    path: &Path,
-    config: &Path,
-    backend: Option<Backend>,
-    options: EvaluationOptions,
-) -> Result<()> {
-    let config: SavedEvaluation = read_config(config)?;
-    config
-        .evaluation
-        .validate_deals(config.first_shuffle_seed, config.episodes)?;
-    let device = backend
-        .or(config.inference_device)
-        .unwrap_or(config.device)
-        .device()?;
-    let network = Network::load(path, &device)?;
-    let results = evaluate(
-        &network,
-        &device,
-        &config.evaluation,
-        config.action_limit,
-        options,
-    )?;
-    println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())
 }

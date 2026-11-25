@@ -10,33 +10,7 @@ use crate::{
     experiment::{AgentKind, GameEnd},
 };
 
-use super::{Config, Evaluations, Matches, OPPONENTS, Run, Score, probe::Tactic};
-
-#[derive(Serialize)]
-pub(super) struct TacticalCounts {
-    tactic: Tactic,
-    pub positions: usize,
-    pub ranked_first: usize,
-}
-
-impl TacticalCounts {
-    pub(super) fn rate(&self) -> Option<f64> {
-        (self.positions != 0).then(|| self.ranked_first as f64 / self.positions as f64)
-    }
-}
-
-pub(super) fn tactical_counts(scores: &[Score], tactic: Tactic) -> TacticalCounts {
-    let mut counts = TacticalCounts {
-        tactic,
-        positions: 0,
-        ranked_first: 0,
-    };
-    for score in scores.iter().filter(|score| score.tactic == tactic) {
-        counts.positions += 1;
-        counts.ranked_first += usize::from(score.best_tactical_rank == 1);
-    }
-    counts
-}
+use super::{Config, Evaluations, Matches, OPPONENTS, Run};
 
 #[derive(Clone, Copy, Default)]
 struct Counts {

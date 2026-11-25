@@ -1,37 +1,20 @@
 use std::{
-    fs, io,
+    fs::File,
     num::NonZeroUsize,
     path::{Path, PathBuf},
 };
 
 use burn::tensor::Device;
-use clap::Args;
 use sequence_agents::{Policy, RandomAgent};
 use sequence_game::{Game, GameConfig, Player};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Backend, Evaluation, last_seed,
+    Evaluation, last_seed,
     model::Network,
     observation::{ACTIONS, Observation, action_index},
 };
 use crate::Result;
-
-#[derive(Args)]
-pub struct Options {
-    /// Training run directories containing checkpoints
-    #[arg(required = true)]
-    runs: Vec<PathBuf>,
-    #[arg(long, default_value_t = 4_000_000)]
-    first_shuffle_seed: u64,
-    #[arg(long, default_value = "128")]
-    deals: NonZeroUsize,
-    /// Seat RNG seeds are policy_seed + 2 * deal offset + seat index (wrapping)
-    #[arg(long, default_value_t = 2029)]
-    policy_seed: u64,
-    #[arg(long, value_enum, default_value = "cpu")]
-    device: Backend,
-}
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +24,41 @@ pub(super) enum Tactic {
 }
 
 pub(super) const TACTICS: [Tactic; 2] = [Tactic::ImmediateWin, Tactic::FirstSequence];
+
+impl Tactic {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::ImmediateWin => "Immediate win",
+            Self::FirstSequence => "First sequence",
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub(super) struct Counts {
+    tactic: Tactic,
+    pub positions: usize,
+    pub ranked_first: usize,
+}
+
+impl Counts {
+    pub(super) fn rate(&self) -> Option<f64> {
+        (self.positions != 0).then(|| self.ranked_first as f64 / self.positions as f64)
+    }
+}
+
+pub(super) fn counts(scores: &[Score], tactic: Tactic) -> Counts {
+    let mut counts = Counts {
+        tactic,
+        positions: 0,
+        ranked_first: 0,
+    };
+    for score in scores.iter().filter(|score| score.tactic == tactic) {
+        counts.positions += 1;
+        counts.ranked_first += usize::from(score.best_tactical_rank == 1);
+    }
+    counts
+}
 
 pub(super) struct Position {
     deal: u64,
@@ -119,23 +137,20 @@ pub(super) fn positions(
             game.apply(actor, action)?;
         }
     }
-    if positions.is_empty() {
-        return Err("no tactical positions on the requested deals".into());
-    }
     Ok(positions)
 }
 
 #[derive(Deserialize, Serialize)]
 pub(super) struct Score {
     pub run: PathBuf,
-    pub episode: usize,
+    pub episode: Option<usize>,
     shuffle_seed: u64,
     action_number: usize,
     seat: usize,
-    pub tactic: Tactic,
+    tactic: Tactic,
     legal_actions: usize,
     tactical_actions: usize,
-    pub best_tactical_rank: usize,
+    best_tactical_rank: usize,
     best_tactical_q: f32,
     best_alternative_q: f32,
     gap: f32,
@@ -178,7 +193,7 @@ pub(super) fn score(
     device: &Device,
     positions: &[Position],
     run: &Path,
-    episode: usize,
+    episode: Option<usize>,
 ) -> Result<Vec<Score>> {
     let mut results = Vec::with_capacity(positions.len());
     for batch in positions.chunks(64) {
@@ -218,45 +233,23 @@ pub(super) fn score(
     Ok(results)
 }
 
-pub fn run(options: Options) -> Result<()> {
-    let settings = Evaluation {
-        first_shuffle_seed: options.first_shuffle_seed,
-        deal_count: options.deals,
-        policy_seed: options.policy_seed,
-    };
-    let positions = positions(&settings, NonZeroUsize::new(512).unwrap())?;
-    let device = options.device.device()?;
-    let mut writer = csv::Writer::from_writer(io::stdout().lock());
-    for run in &options.runs {
-        let mut checkpoints = Vec::new();
-        for entry in fs::read_dir(run.join("checkpoints"))? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|e| e == "bpk") {
-                let episode = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| s.strip_prefix("episode-"))
-                    .ok_or("invalid checkpoint name")?
-                    .parse::<usize>()?;
-                checkpoints.push((episode, path));
-            }
-        }
-        if checkpoints.is_empty() {
-            return Err(format!("no checkpoints in {}", run.display()).into());
-        }
-        checkpoints.sort();
-        for (episode, path) in checkpoints {
-            for result in score(
-                &Network::load(&path, &device)?,
-                &device,
-                &positions,
-                run,
-                episode,
-            )? {
-                writer.serialize(result)?;
-            }
-        }
-        writer.flush()?;
-    }
-    Ok(())
+pub(super) fn writer(path: &Path) -> Result<csv::Writer<File>> {
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_path(path)?;
+    writer.write_record([
+        "run",
+        "episode",
+        "shuffle_seed",
+        "action_number",
+        "seat",
+        "tactic",
+        "legal_actions",
+        "tactical_actions",
+        "best_tactical_rank",
+        "best_tactical_q",
+        "best_alternative_q",
+        "gap",
+    ])?;
+    Ok(writer)
 }

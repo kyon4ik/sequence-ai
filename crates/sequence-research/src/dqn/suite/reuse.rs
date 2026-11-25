@@ -13,7 +13,7 @@ use crate::{
 use super::super::Evaluation;
 use super::{
     Config, EVALUATION_VERSION, Evaluations, GameRow, Matches, OPPONENTS, Run, Score, Totals,
-    Validated, probe::Position, read_config,
+    Validated, read_config, tactics::Position,
 };
 
 pub(super) struct PriorReport<'a> {
@@ -221,7 +221,10 @@ impl<'a> PriorReport<'a> {
         let mut tactics = csv::Reader::from_path(&path)?;
         for row in tactics.deserialize::<Score>() {
             let mut score = row.map_err(|error| format!("{}: {error}", path.display()))?;
-            let key = (score.run, score.episode);
+            let episode = score
+                .episode
+                .ok_or("cached tactic is missing its checkpoint episode")?;
+            let key = (score.run, episode);
             if let Some(&(index, id)) = lookup.get(&key) {
                 score.run = runs[index].directory.clone();
                 validation
