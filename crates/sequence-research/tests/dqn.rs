@@ -155,6 +155,42 @@ fn trains_and_evaluates_a_checkpoint_against_both_baselines() {
             .unwrap()
             .contains("Tactical action ranked first")
     );
+
+    let config = workspace.path().join("search.json");
+    fs::write(
+        &config,
+        json!({
+            "policies": ["ismcts", "dqn"],
+            "checkpoint": "run/checkpoints/episode-000001.bpk",
+            "search": {"simulations": 4, "depth": 2},
+            "first_shuffle_seed": 18000000,
+            "deal_count": 1,
+            "policy_seed": 2080,
+            "action_limit": 4
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let search_report = workspace.path().join("search-report");
+    let repeated = workspace.path().join("search-repeated");
+    for output in [&search_report, &repeated] {
+        run_successfully(
+            Command::new(executable)
+                .arg("run")
+                .arg(&config)
+                .arg("--output")
+                .arg(output),
+        );
+    }
+
+    let games = fs::read(search_report.join("games.csv")).unwrap();
+    assert_eq!(games, fs::read(repeated.join("games.csv")).unwrap());
+    let times: Value =
+        serde_json::from_slice(&fs::read(search_report.join("move-times.json")).unwrap()).unwrap();
+    assert_eq!(times[0]["policy"], "ismcts");
+    assert_eq!(times[0]["decisions"], 4);
+    assert_eq!(times[1]["decisions"], 4);
 }
 
 #[test]

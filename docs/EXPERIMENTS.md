@@ -4,7 +4,7 @@ The training presets record model and optimizer settings. The evaluation suite r
 
 ## Completed training experiments
 
-All arms used Double DQN and seeds 42–44. Each run trained for 51,200 episodes. The temperature run for seed 42 continued to 110,080 episodes.
+All arms used Double DQN and seeds 42–44. Each run trained for 51,200 episodes. The temperature run for seed 42 continued to 148,480 episodes (4,171,829 learner decisions).
 
 | Name | Config | Description |
 | --- | --- | --- |
@@ -31,6 +31,20 @@ On the separate 256-deal holdout, the final public-history checkpoints won 23.0%
 ![Validation win rates against Random and Heuristic across training](figures/dqn-validation-win-rates.svg)
 
 ![Top-ranked immediate wins and first-sequence moves across training](figures/dqn-tactical-rankings.svg)
+
+## Information set MCTS with frozen Double DQN
+
+Greedy DQN and information set Monte Carlo tree search (ISMCTS) used the same seed-42 temperature checkpoint, `episode-148480.bpk`. Search samples the opponent hand and draw pile uniformly from unseen cards, uses greedy DQN for simulated opponent replies, and uses the frozen Q-values for action priors and leaf estimates. A 16-deal development panel compared 32 and 128 simulations per move. The 32-simulation budget won more games in both development matchups and was selected for the holdout, with a depth of two decisions for the searching player. [Search implementation](../crates/sequence-research/src/dqn/search.rs)
+
+Each holdout deal was played twice with the policies swapping seats. Shuffle seeds ranged from 19,000,000 to 19,000,511, with an action limit of 512 and policy seeds 2090–2099 across the ten batches. The added 320 deals were evaluated after the initial 192. The 95% intervals use 10,000 bootstrap resamples with both seats kept together for each deal and bootstrap seed 20261125.
+
+| Panel | ISMCTS wins vs. greedy DQN (95% CI) | ISMCTS wins vs. Heuristic | Greedy DQN wins vs. Heuristic | Gain vs. Heuristic (95% CI) |
+| --- | ---: | ---: | ---: | ---: |
+| Initial 192 deals | 58.6% (54.2–63.0%) | 42.4% | 29.4% | +13.0 pp (+7.6 to +18.2) |
+| Added 320 deals | 63.3% (60.0–66.6%) | 40.8% | 28.8% | +12.0 pp (+7.7 to +16.3) |
+| All 512 deals | **61.5% (58.9–64.2%)** | **41.4%** | **29.0%** | **+12.4 pp (+9.1 to +15.8)** |
+
+The added panel reproduced the gains in both matchups for this checkpoint. In the serial head-to-head development run, the 32-simulation policy took 22.0 ms per decision at the median and 26.2 ms at the 95th percentile on CPU. Greedy DQN took 0.36 ms and 0.42 ms, respectively.
 
 ## Planned experiments
 

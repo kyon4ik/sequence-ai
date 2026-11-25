@@ -84,6 +84,57 @@ fn setup_deals_seeded_deck_in_seat_order() {
 }
 
 #[test]
+fn sampled_continuation_preserves_visible_state_and_ignores_real_hidden_cards() {
+    let mut game = Game::new(config(Player::One));
+    for _ in 0..10 {
+        let player = game.current_player().unwrap();
+        let action = game.view(player).legal_actions[0];
+        game.apply(player, action).unwrap();
+    }
+    game.exchanged_this_turn = true;
+    let player = game.current_player().unwrap();
+    let view = game.view(player);
+    let sample = Game::sample_from(&view, &mut ChaCha8Rng::seed_from_u64(23));
+    let sampled_view = sample.view(player);
+
+    assert_eq!(sampled_view.hand, view.hand);
+    assert_eq!(sampled_view.hand_sizes, view.hand_sizes);
+    assert_eq!(sampled_view.board, view.board);
+    assert_eq!(sampled_view.claimed_sequences, view.claimed_sequences);
+    assert_eq!(sampled_view.discard_piles, view.discard_piles);
+    assert_eq!(sampled_view.draw_pile_size, view.draw_pile_size);
+    assert_eq!(sampled_view.own_plays, view.own_plays);
+    assert_eq!(sampled_view.opponent_plays, view.opponent_plays);
+    assert_eq!(sampled_view.legal_actions, view.legal_actions);
+    assert!(sampled_view.exchanged_this_turn);
+
+    for card in Card::all() {
+        assert_eq!(
+            sample
+                .hands
+                .iter()
+                .flatten()
+                .chain(sample.discards.iter().flatten())
+                .chain(&sample.draw_pile)
+                .filter(|&&candidate| candidate == card)
+                .count(),
+            2
+        );
+    }
+
+    let opponent = player.opponent().index();
+    let index = game
+        .draw_pile
+        .iter()
+        .position(|&card| card != game.hands[opponent][0])
+        .unwrap();
+    std::mem::swap(&mut game.hands[opponent][0], &mut game.draw_pile[index]);
+    let repeated = Game::sample_from(&game.view(player), &mut ChaCha8Rng::seed_from_u64(23));
+    assert_eq!(sample.hands, repeated.hands);
+    assert_eq!(sample.draw_pile, repeated.draw_pile);
+}
+
+#[test]
 fn card_effects_validate_turn_card_and_target() {
     let mut game = Game::new(config(Player::One));
     game.hands = [vec![ACE, ACE, WILD], vec![REMOVAL]];

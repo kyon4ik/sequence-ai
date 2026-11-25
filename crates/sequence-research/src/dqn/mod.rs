@@ -3,6 +3,7 @@ mod figures;
 pub(crate) mod model;
 mod observation;
 mod sampling;
+pub(crate) mod search;
 mod snapshot;
 pub mod suite;
 mod tactics;

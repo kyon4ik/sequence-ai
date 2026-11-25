@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, error::Error, fmt};
 
-use rand::{SeedableRng, seq::SliceRandom};
+use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 
 use crate::{Board, Card, Position, Sequence, card::Effect, claims::new_claims};
@@ -93,11 +93,14 @@ pub struct PlayerView<'a> {
     pub board: &'a Board,
     pub claimed_sequences: [&'a [Sequence]; 2],
     pub discard_piles: [&'a [Card]; 2],
+    /// This player's most recent board plays, newest first, padded with `None`.
+    pub own_plays: &'a [Option<CardPlay>; PLAY_HISTORY_LENGTH],
     /// The opponent's most recent board plays, newest first, padded with `None`.
     pub opponent_plays: &'a [Option<CardPlay>; PLAY_HISTORY_LENGTH],
     pub hand_sizes: [usize; 2],
     pub draw_pile_size: usize,
     pub current_player: Option<Player>,
+    pub exchanged_this_turn: bool,
     pub consecutive_passes: u8,
     pub outcome: Option<Outcome>,
     pub legal_actions: Vec<Action>,
@@ -171,6 +174,56 @@ impl Game {
         }
     }
 
+    /// Sample a continuation using the visible cards and a uniform allocation of
+    /// the remaining cards to the opponent's hand and the draw pile.
+    pub fn sample_from(view: &PlayerView<'_>, rng: &mut impl Rng) -> Self {
+        let mut unseen: Vec<_> = Card::all().chain(Card::all()).collect();
+        for card in view
+            .hand
+            .iter()
+            .chain(view.discard_piles.into_iter().flatten())
+        {
+            let index = unseen
+                .iter()
+                .position(|candidate| candidate == card)
+                .expect("visible cards belong to the two-deck supply");
+            unseen.swap_remove(index);
+        }
+        unseen.shuffle(rng);
+
+        let own = view.player.index();
+        let other = view.player.opponent().index();
+        let mut hands = [Vec::new(), Vec::new()];
+        hands[own] = view.hand.to_vec();
+        hands[other].extend(unseen.drain(..view.hand_sizes[other]));
+        debug_assert_eq!(unseen.len(), view.draw_pile_size);
+
+        let mut recent_plays = [[None; PLAY_HISTORY_LENGTH]; 2];
+        recent_plays[own] = *view.own_plays;
+        recent_plays[other] = *view.opponent_plays;
+
+        let current_player = view.current_player.unwrap_or(view.player);
+        let shuffle_seed = rng.random();
+        Self {
+            config: GameConfig {
+                shuffle_seed,
+                starting_player: current_player,
+                policies: Default::default(),
+            },
+            board: view.board.clone(),
+            hands,
+            claimed: view.claimed_sequences.map(<[Sequence]>::to_vec),
+            discards: view.discard_piles.map(<[Card]>::to_vec),
+            recent_plays,
+            draw_pile: unseen.into(),
+            rng: ChaCha8Rng::seed_from_u64(shuffle_seed),
+            current_player,
+            exchanged_this_turn: view.exchanged_this_turn,
+            consecutive_passes: view.consecutive_passes,
+            outcome: view.outcome,
+        }
+    }
+
     pub fn current_player(&self) -> Option<Player> {
         self.outcome.is_none().then_some(self.current_player)
     }
@@ -183,10 +236,12 @@ impl Game {
             board: &self.board,
             claimed_sequences: self.claimed.each_ref().map(Vec::as_slice),
             discard_piles: self.discards.each_ref().map(Vec::as_slice),
+            own_plays: &self.recent_plays[player.index()],
             opponent_plays: &self.recent_plays[player.opponent().index()],
             hand_sizes: self.hands.each_ref().map(Vec::len),
             draw_pile_size: self.draw_pile.len(),
             current_player,
+            exchanged_this_turn: self.exchanged_this_turn,
             consecutive_passes: self.consecutive_passes,
             outcome: self.outcome,
             legal_actions: if current_player == Some(player) {

@@ -191,7 +191,7 @@ impl Network {
         sample_legal_action(&view.legal_actions, scores, temperature, rng)
     }
 
-    fn action_scores(&self, observation: &Observation, device: &Device) -> TensorData {
+    pub(super) fn action_scores(&self, observation: &Observation, device: &Device) -> TensorData {
         self.forward(std::iter::once(observation), device)
             .into_data()
     }

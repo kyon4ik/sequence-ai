@@ -25,8 +25,9 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
     about = "Run reproducible Sequence policy matchups",
     long_about = concat!(
         "Run reproducible Sequence policy matchups. Copy experiments/random-vs-heuristic.json ",
-        "to define your own experiment. Choose random, heuristic, or dqn for each policy. ",
-        "For dqn, set checkpoint to a .bpk path relative to the config file.\n\n",
+        "to define your own experiment. Choose random, heuristic, dqn, or ismcts for each policy. ",
+        "For dqn and ismcts, set checkpoint to a .bpk path relative to the config file. ",
+        "For ismcts, also set search.simulations and search.depth (root-player decisions).\n\n",
         "Each deal is played twice with the policies in swapped seats. Seat one opens both games. The figures show ",
         "results for the first configured policy. Share the config and Git revision ",
         "to reproduce a run with cargo run --locked."
@@ -169,7 +170,7 @@ fn run(config_path: &Path, output: Option<PathBuf>) -> Result<()> {
     let copied =
         config.save_checkpoint(config_path.parent().unwrap_or(Path::new(".")), directory)?;
     let checkpoint = config.load_checkpoint(directory)?;
-    let report = config.evaluate(checkpoint.as_ref())?;
+    let (report, move_timing) = config.evaluate(checkpoint.as_ref())?;
     let summary = Summary::from_report(&config, &report);
 
     let config_bytes = if copied {
@@ -183,6 +184,12 @@ fn run(config_path: &Path, output: Option<PathBuf>) -> Result<()> {
         directory.join("summary.json"),
         serde_json::to_string_pretty(&summary)? + "\n",
     )?;
+    if let Some(move_timing) = move_timing {
+        fs::write(
+            directory.join("move-times.json"),
+            serde_json::to_string_pretty(&move_timing)? + "\n",
+        )?;
+    }
     plots::write_figures(directory, &report, &summary)?;
     fs::rename(directory, &output).map_err(|error| {
         io::Error::new(

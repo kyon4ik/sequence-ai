@@ -1,7 +1,9 @@
 use std::{
+    cell::RefCell,
     fmt, fs,
     num::NonZeroUsize,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use burn::tensor::Device;
@@ -14,7 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Result,
-    dqn::model::{GreedyPolicy, Network},
+    dqn::{
+        model::{GreedyPolicy, Network},
+        search::{SearchPolicy, SearchSettings},
+    },
 };
 
 const STARTING_PLAYER: Player = Player::One;
@@ -25,6 +30,8 @@ pub struct ExperimentConfig {
     pub policies: [PolicyKind; 2],
     #[serde(skip_serializing_if = "Option::is_none")]
     checkpoint: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search: Option<SearchSettings>,
     first_shuffle_seed: u64,
     deal_count: NonZeroUsize,
     policy_seed: u64,
@@ -52,12 +59,16 @@ impl ExperimentConfig {
     }
 
     fn validate_checkpoint(&self) -> Result<()> {
+        if self.policies.contains(&PolicyKind::Ismcts) != self.search.is_some() {
+            return Err("search settings are required exactly when using an ismcts policy".into());
+        }
+
         match (
-            self.policies.contains(&PolicyKind::Dqn),
+            self.policies.contains(&PolicyKind::Dqn) || self.policies.contains(&PolicyKind::Ismcts),
             self.checkpoint.is_some(),
         ) {
-            (true, false) => Err("a dqn policy requires a checkpoint".into()),
-            (false, true) => Err("a checkpoint requires a dqn policy".into()),
+            (true, false) => Err("a dqn or ismcts policy requires a checkpoint".into()),
+            (false, true) => Err("a checkpoint requires a dqn or ismcts policy".into()),
             _ => Ok(()),
         }
     }
@@ -70,10 +81,13 @@ impl ExperimentConfig {
             .transpose()
     }
 
-    pub fn evaluate(&self, checkpoint: Option<&CheckpointPolicy>) -> Result<EvaluationReport> {
+    pub fn evaluate(
+        &self,
+        checkpoint: Option<&CheckpointPolicy>,
+    ) -> Result<(EvaluationReport, Option<[MoveTiming; 2]>)> {
         let [first, second] = self.policies;
-        let first = first.factory(checkpoint)?;
-        let second = second.factory(checkpoint)?;
+        let first = first.factory(checkpoint, self.search)?;
+        let second = second.factory(checkpoint, self.search)?;
         let last_seed = self
             .first_shuffle_seed
             .checked_add(u64::try_from(self.deal_count.get() - 1)?)
@@ -86,11 +100,74 @@ impl ExperimentConfig {
             action_limit: self.action_limit,
             capture_replays: false,
         };
-        Ok(evaluate(
+        let timings = self
+            .search
+            .map(|_| [RefCell::default(), RefCell::default()]);
+        let report = evaluate(
             &config,
-            |seed| first.build(seed),
-            |seed| second.build(seed),
-        )?)
+            |seed| MeasuredAgent {
+                agent: first.build(seed),
+                times: timings.as_ref().map(|times| &times[0]),
+            },
+            |seed| MeasuredAgent {
+                agent: second.build(seed),
+                times: timings.as_ref().map(|times| &times[1]),
+            },
+        )?;
+        let timings = timings.map(|timings| {
+            let [first, second] = timings.map(RefCell::into_inner);
+            [
+                MoveTiming::new(&self.policies[0], first),
+                MoveTiming::new(&self.policies[1], second),
+            ]
+        });
+
+        Ok((report, timings))
+    }
+}
+
+struct MeasuredAgent<'a> {
+    agent: Agent<'a>,
+    times: Option<&'a RefCell<Vec<f64>>>,
+}
+
+impl Policy for MeasuredAgent<'_> {
+    fn choose_action(&mut self, view: &PlayerView<'_>) -> Option<Action> {
+        let Some(times) = self.times else {
+            return self.agent.choose_action(view);
+        };
+        let start = Instant::now();
+        let action = self.agent.choose_action(view);
+        times
+            .borrow_mut()
+            .push(start.elapsed().as_secs_f64() * 1000.0);
+        action
+    }
+}
+
+#[derive(Serialize)]
+pub struct MoveTiming {
+    policy: String,
+    decisions: usize,
+    median_ms: Option<f64>,
+    p95_ms: Option<f64>,
+}
+
+impl MoveTiming {
+    fn new(policy: &PolicyKind, mut times: Vec<f64>) -> Self {
+        times.sort_unstable_by(f64::total_cmp);
+        let percentile = |percent: usize| {
+            (times.len() * percent)
+                .div_ceil(100)
+                .checked_sub(1)
+                .map(|index| times[index])
+        };
+        Self {
+            policy: policy.to_string(),
+            decisions: times.len(),
+            median_ms: percentile(50),
+            p95_ms: percentile(95),
+        }
     }
 }
 
@@ -100,6 +177,7 @@ pub enum PolicyKind {
     Random,
     Heuristic,
     Dqn,
+    Ismcts,
 }
 
 impl fmt::Display for PolicyKind {
@@ -108,6 +186,7 @@ impl fmt::Display for PolicyKind {
             Self::Random => AgentKind::Random.fmt(f),
             Self::Heuristic => AgentKind::Heuristic.fmt(f),
             Self::Dqn => f.write_str("dqn"),
+            Self::Ismcts => f.write_str("ismcts"),
         }
     }
 }
@@ -129,15 +208,24 @@ impl CheckpointPolicy {
 enum PolicyFactory<'a> {
     Baseline(AgentKind),
     Dqn(&'a CheckpointPolicy),
+    Ismcts(&'a CheckpointPolicy, SearchSettings),
 }
 
 impl PolicyKind {
-    fn factory(self, checkpoint: Option<&CheckpointPolicy>) -> Result<PolicyFactory<'_>> {
+    fn factory(
+        self,
+        checkpoint: Option<&CheckpointPolicy>,
+        search: Option<SearchSettings>,
+    ) -> Result<PolicyFactory<'_>> {
         match self {
             Self::Random => Ok(PolicyFactory::Baseline(AgentKind::Random)),
             Self::Heuristic => Ok(PolicyFactory::Baseline(AgentKind::Heuristic)),
             Self::Dqn => Ok(PolicyFactory::Dqn(
                 checkpoint.ok_or("missing DQN checkpoint")?,
+            )),
+            Self::Ismcts => Ok(PolicyFactory::Ismcts(
+                checkpoint.ok_or("missing ISMCTS checkpoint")?,
+                search.ok_or("missing ISMCTS search settings")?,
             )),
         }
     }
@@ -151,6 +239,12 @@ impl<'a> PolicyFactory<'a> {
                 network: &policy.network,
                 device: &policy.device,
             }),
+            Self::Ismcts(policy, settings) => Agent::Ismcts(SearchPolicy::new(
+                &policy.network,
+                &policy.device,
+                *settings,
+                seed,
+            )),
         }
     }
 }
@@ -175,6 +269,7 @@ pub(crate) enum Agent<'a> {
     Random(RandomAgent),
     Heuristic(HeuristicAgent),
     Dqn(GreedyPolicy<'a>),
+    Ismcts(SearchPolicy<'a>),
 }
 
 impl AgentKind {
@@ -192,6 +287,7 @@ impl Policy for Agent<'_> {
             Self::Random(agent) => agent.choose_action(view),
             Self::Heuristic(agent) => agent.choose_action(view),
             Self::Dqn(agent) => agent.choose_action(view),
+            Self::Ismcts(agent) => agent.choose_action(view),
         }
     }
 }
@@ -290,11 +386,11 @@ impl GameRow {
     ) -> Result<Replay> {
         let mut player_one = self
             .player_one_policy
-            .factory(checkpoint)?
+            .factory(checkpoint, config.search)?
             .build(self.player_one_seed);
         let mut player_two = self
             .player_two_policy
-            .factory(checkpoint)?
+            .factory(checkpoint, config.search)?
             .build(self.player_two_seed);
         let mut game = Match::new(
             MatchConfig {
