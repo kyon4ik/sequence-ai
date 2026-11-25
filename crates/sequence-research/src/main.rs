@@ -25,7 +25,8 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
     about = "Run reproducible Sequence policy matchups",
     long_about = concat!(
         "Run reproducible Sequence policy matchups. Copy experiments/random-vs-heuristic.json ",
-        "to define your own experiment. Choose random or heuristic for each policy.\n\n",
+        "to define your own experiment. Choose random, heuristic, or dqn for each policy. ",
+        "For dqn, set checkpoint to a .bpk path relative to the config file.\n\n",
         "Each deal is played twice with the policies in swapped seats. Seat one opens both games. The figures show ",
         "results for the first configured policy. Share the config and Git revision ",
         "to reproduce a run with cargo run --locked."
@@ -155,10 +156,8 @@ fn run(config_path: &Path, output: Option<PathBuf>) -> Result<()> {
     let config_bytes = fs::read(config_path).map_err(|error| {
         io::Error::new(error.kind(), format!("{}: {error}", config_path.display()))
     })?;
-    let config: ExperimentConfig = serde_json::from_slice(&config_bytes)
+    let mut config: ExperimentConfig = serde_json::from_slice(&config_bytes)
         .map_err(|error| format!("{}: {error}", config_path.display()))?;
-    let report = config.evaluate()?;
-    let summary = Summary::from_report(&config, &report);
 
     let parent = output
         .parent()
@@ -167,6 +166,17 @@ fn run(config_path: &Path, output: Option<PathBuf>) -> Result<()> {
     fs::create_dir_all(parent)?;
     let staging = tempfile::tempdir_in(parent)?;
     let directory = staging.path();
+    let copied =
+        config.save_checkpoint(config_path.parent().unwrap_or(Path::new(".")), directory)?;
+    let checkpoint = config.load_checkpoint(directory)?;
+    let report = config.evaluate(checkpoint.as_ref())?;
+    let summary = Summary::from_report(&config, &report);
+
+    let config_bytes = if copied {
+        (serde_json::to_string_pretty(&config)? + "\n").into_bytes()
+    } else {
+        config_bytes
+    };
     fs::write(directory.join("config.json"), config_bytes)?;
     write_games(&directory.join("games.csv"), &config, &report)?;
     fs::write(

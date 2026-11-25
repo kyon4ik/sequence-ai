@@ -1,5 +1,10 @@
-use std::{fmt, num::NonZeroUsize, path::Path};
+use std::{
+    fmt, fs,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 
+use burn::tensor::Device;
 use sequence_agents::{HeuristicAgent, Policy, RandomAgent};
 use sequence_game::{Action, GameConfig, Outcome, Player, PlayerView};
 use sequence_match::{
@@ -7,14 +12,19 @@ use sequence_match::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use crate::{
+    Result,
+    dqn::model::{GreedyPolicy, Network},
+};
 
 const STARTING_PLAYER: Player = Player::One;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExperimentConfig {
-    pub policies: [AgentKind; 2],
+    pub policies: [PolicyKind; 2],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<PathBuf>,
     first_shuffle_seed: u64,
     deal_count: NonZeroUsize,
     policy_seed: u64,
@@ -22,8 +32,48 @@ pub struct ExperimentConfig {
 }
 
 impl ExperimentConfig {
-    pub fn evaluate(&self) -> Result<EvaluationReport> {
+    pub fn save_checkpoint(
+        &mut self,
+        config_directory: &Path,
+        run_directory: &Path,
+    ) -> Result<bool> {
+        self.validate_checkpoint()?;
+        let Some(path) = &self.checkpoint else {
+            return Ok(false);
+        };
+        let source = config_directory.join(path);
+        let name = path.file_name().ok_or("expected a checkpoint filename")?;
+        let relative = Path::new("checkpoints").join(name);
+        fs::create_dir(run_directory.join("checkpoints"))?;
+        fs::copy(&source, run_directory.join(&relative))
+            .map_err(|error| format!("could not copy checkpoint {}: {error}", source.display()))?;
+        self.checkpoint = Some(relative);
+        Ok(true)
+    }
+
+    fn validate_checkpoint(&self) -> Result<()> {
+        match (
+            self.policies.contains(&PolicyKind::Dqn),
+            self.checkpoint.is_some(),
+        ) {
+            (true, false) => Err("a dqn policy requires a checkpoint".into()),
+            (false, true) => Err("a checkpoint requires a dqn policy".into()),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn load_checkpoint(&self, directory: &Path) -> Result<Option<CheckpointPolicy>> {
+        self.validate_checkpoint()?;
+        self.checkpoint
+            .as_ref()
+            .map(|path| CheckpointPolicy::load(&directory.join(path)))
+            .transpose()
+    }
+
+    pub fn evaluate(&self, checkpoint: Option<&CheckpointPolicy>) -> Result<EvaluationReport> {
         let [first, second] = self.policies;
+        let first = first.factory(checkpoint)?;
+        let second = second.factory(checkpoint)?;
         let last_seed = self
             .first_shuffle_seed
             .checked_add(u64::try_from(self.deal_count.get() - 1)?)
@@ -46,6 +96,67 @@ impl ExperimentConfig {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum PolicyKind {
+    Random,
+    Heuristic,
+    Dqn,
+}
+
+impl fmt::Display for PolicyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Random => AgentKind::Random.fmt(f),
+            Self::Heuristic => AgentKind::Heuristic.fmt(f),
+            Self::Dqn => f.write_str("dqn"),
+        }
+    }
+}
+
+pub struct CheckpointPolicy {
+    network: Network,
+    device: Device,
+}
+
+impl CheckpointPolicy {
+    fn load(path: &Path) -> Result<Self> {
+        let device = Device::flex();
+        let network = Network::load(path, &device)
+            .map_err(|error| format!("could not load checkpoint {}: {error}", path.display()))?;
+        Ok(Self { network, device })
+    }
+}
+
+enum PolicyFactory<'a> {
+    Baseline(AgentKind),
+    Dqn(&'a CheckpointPolicy),
+}
+
+impl PolicyKind {
+    fn factory(self, checkpoint: Option<&CheckpointPolicy>) -> Result<PolicyFactory<'_>> {
+        match self {
+            Self::Random => Ok(PolicyFactory::Baseline(AgentKind::Random)),
+            Self::Heuristic => Ok(PolicyFactory::Baseline(AgentKind::Heuristic)),
+            Self::Dqn => Ok(PolicyFactory::Dqn(
+                checkpoint.ok_or("missing DQN checkpoint")?,
+            )),
+        }
+    }
+}
+
+impl<'a> PolicyFactory<'a> {
+    fn build(&self, seed: u64) -> Agent<'a> {
+        match self {
+            Self::Baseline(kind) => kind.build(seed),
+            Self::Dqn(policy) => Agent::Dqn(GreedyPolicy {
+                network: &policy.network,
+                device: &policy.device,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentKind {
     Random,
     Heuristic,
@@ -60,13 +171,14 @@ impl fmt::Display for AgentKind {
     }
 }
 
-enum Agent {
+pub(crate) enum Agent<'a> {
     Random(RandomAgent),
     Heuristic(HeuristicAgent),
+    Dqn(GreedyPolicy<'a>),
 }
 
 impl AgentKind {
-    pub(crate) fn build(self, seed: u64) -> impl Policy {
+    pub(crate) fn build(self, seed: u64) -> Agent<'static> {
         match self {
             Self::Random => Agent::Random(RandomAgent::new(seed)),
             Self::Heuristic => Agent::Heuristic(HeuristicAgent::new(seed)),
@@ -74,11 +186,12 @@ impl AgentKind {
     }
 }
 
-impl Policy for Agent {
+impl Policy for Agent<'_> {
     fn choose_action(&mut self, view: &PlayerView<'_>) -> Option<Action> {
         match self {
             Self::Random(agent) => agent.choose_action(view),
             Self::Heuristic(agent) => agent.choose_action(view),
+            Self::Dqn(agent) => agent.choose_action(view),
         }
     }
 }
@@ -125,8 +238,8 @@ pub struct GameRow {
     pub pair_id: usize,
     pub shuffle_seed: u64,
     pub policy_a_seat: Seat,
-    player_one_policy: AgentKind,
-    player_two_policy: AgentKind,
+    player_one_policy: PolicyKind,
+    player_two_policy: PolicyKind,
     player_one_seed: u64,
     player_two_seed: u64,
     pub outcome: GameEnd,
@@ -170,9 +283,19 @@ pub fn write_games(
 }
 
 impl GameRow {
-    pub fn reconstruct(&self, config: &ExperimentConfig) -> Result<Replay> {
-        let mut player_one = self.player_one_policy.build(self.player_one_seed);
-        let mut player_two = self.player_two_policy.build(self.player_two_seed);
+    pub fn reconstruct(
+        &self,
+        config: &ExperimentConfig,
+        checkpoint: Option<&CheckpointPolicy>,
+    ) -> Result<Replay> {
+        let mut player_one = self
+            .player_one_policy
+            .factory(checkpoint)?
+            .build(self.player_one_seed);
+        let mut player_two = self
+            .player_two_policy
+            .factory(checkpoint)?
+            .build(self.player_two_seed);
         let mut game = Match::new(
             MatchConfig {
                 game: GameConfig {

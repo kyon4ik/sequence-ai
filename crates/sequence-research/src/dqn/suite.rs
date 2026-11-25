@@ -24,7 +24,7 @@ use super::{
     figures::{self, Axis, Curve, Series},
     last_seed,
     model::Network,
-    read_config, snapshot,
+    read_config, sampling, snapshot,
     tactics::{self, Score},
 };
 
@@ -383,22 +383,7 @@ fn sample_targets(runs: &[Run], percent: NonZeroUsize) -> Result<Vec<usize>> {
     if last < first {
         return Err("training runs share no learner-decision range".into());
     }
-    let count = (available * percent.get())
-        .div_ceil(100)
-        .max(2)
-        .min(available);
-    let intervals = count.saturating_sub(1).min(last - first);
-    Ok(if intervals == 0 {
-        vec![first]
-    } else {
-        (0..=intervals)
-            .map(|i| {
-                let offset = ((last - first) as u128 * i as u128 + (intervals / 2) as u128)
-                    / intervals as u128;
-                first + offset as usize
-            })
-            .collect()
-    })
+    Ok(sampling::targets(first, last, available, percent.get()))
 }
 
 fn sample(runs: &mut [Run], targets: &[usize]) {
@@ -407,16 +392,16 @@ fn sample(runs: &mut [Run], targets: &[usize]) {
         run.sampled = targets
             .iter()
             .map(|&target| {
-                range.contains(&target).then(|| {
-                    run.checkpoints
-                        .iter()
-                        .enumerate()
-                        .min_by_key(|(_, checkpoint)| {
-                            (checkpoint.decisions.abs_diff(target), checkpoint.decisions)
-                        })
-                        .unwrap()
-                        .0
-                })
+                if range.contains(&target) {
+                    sampling::nearest_index(
+                        run.checkpoints
+                            .iter()
+                            .map(|checkpoint| checkpoint.decisions),
+                        target,
+                    )
+                } else {
+                    None
+                }
             })
             .collect();
     }

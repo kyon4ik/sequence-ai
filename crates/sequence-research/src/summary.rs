@@ -5,12 +5,12 @@ use sequence_match::{EvaluationReport, MatchEnd};
 use serde::Serialize;
 use statrs::distribution::{ContinuousCDF, StudentsT};
 
-use crate::experiment::{AgentKind, ExperimentConfig};
+use crate::experiment::{ExperimentConfig, PolicyKind};
 
 #[derive(Serialize)]
 pub struct Summary {
     pub board_layout: &'static str,
-    pub policies: [AgentKind; 2],
+    pub policies: [PolicyKind; 2],
     pub deals: usize,
     pub overall: Score,
     pub starts: Score,

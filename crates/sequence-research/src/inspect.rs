@@ -15,7 +15,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::{
     Result,
-    experiment::{AgentKind, ExperimentConfig, GameEnd, GameRow},
+    experiment::{CheckpointPolicy, ExperimentConfig, GameEnd, GameRow, PolicyKind},
 };
 
 pub fn serve(
@@ -144,6 +144,7 @@ fn json_error(status: u16, error: &str) -> HttpResponse {
 struct Run {
     name: String,
     config: ExperimentConfig,
+    checkpoint: Option<CheckpointPolicy>,
     games: BTreeMap<usize, GameRow>,
 }
 
@@ -170,11 +171,12 @@ impl Run {
         }
 
         let config_path = directory.join("config.json");
-        let config = serde_json::from_slice(
+        let config: ExperimentConfig = serde_json::from_slice(
             &fs::read(&config_path)
                 .map_err(|error| format!("could not read {}: {error}", config_path.display()))?,
         )
         .map_err(|error| format!("{}: {error}", config_path.display()))?;
+        let checkpoint = config.load_checkpoint(directory)?;
 
         let games_path = directory.join("games.csv");
         let mut reader = csv::Reader::from_path(&games_path)
@@ -191,6 +193,7 @@ impl Run {
         Ok(Self {
             name: name.to_string_lossy().into_owned(),
             config,
+            checkpoint,
             games,
         })
     }
@@ -215,7 +218,7 @@ impl Run {
     }
 
     fn replay(&self, row: &GameRow) -> Result<GameReplay> {
-        let replay = row.reconstruct(&self.config)?;
+        let replay = row.reconstruct(&self.config, self.checkpoint.as_ref())?;
         let mut frames = Vec::with_capacity(replay.actions.len() + 1);
         let mut board = Vec::new();
         replay.play(|_, game| {
@@ -233,7 +236,7 @@ impl Run {
 #[derive(Serialize)]
 struct Catalog<'a> {
     name: &'a str,
-    policies: [AgentKind; 2],
+    policies: [PolicyKind; 2],
     games: Vec<CatalogGame>,
 }
 

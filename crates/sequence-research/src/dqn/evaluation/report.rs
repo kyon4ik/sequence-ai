@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, File},
     io,
     path::{Path, PathBuf},
@@ -15,7 +16,7 @@ use crate::dqn::{
     Backend, Evaluation, SavedEvaluation,
     figures::{self, Axis, Curve, Series},
     model::Network,
-    read_config, tactics,
+    read_config, sampling, tactics,
 };
 
 #[derive(Args)]
@@ -26,6 +27,9 @@ pub struct Options {
     /// Write per-game results to a new CSV
     #[arg(long)]
     games: Option<PathBuf>,
+    /// Percent of a run's checkpoints to sample (1–100, default 100). Keeps both endpoints.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100))]
+    checkpoint_percent: Option<u8>,
     #[command(flatten)]
     matches: MatchOptions,
 }
@@ -35,6 +39,7 @@ struct Settings {
     #[serde(flatten)]
     matches: SavedEvaluation,
     tactics: Option<Evaluation>,
+    checkpoint_percent: Option<u8>,
 }
 
 #[derive(Serialize)]
@@ -70,6 +75,7 @@ pub fn run(input: &Path, config: &Path, backend: Option<Backend>, options: Optio
     let Options {
         output,
         games,
+        checkpoint_percent,
         matches,
     } = options;
     if output.try_exists()? {
@@ -80,6 +86,12 @@ pub fn run(input: &Path, config: &Path, backend: Option<Backend>, options: Optio
         .into());
     }
     let config: Settings = read_config(config)?;
+    let checkpoint_percent = checkpoint_percent
+        .or(config.checkpoint_percent)
+        .unwrap_or(100);
+    if !(1..=100).contains(&checkpoint_percent) {
+        return Err("checkpoint_percent must be from 1 to 100".into());
+    }
     let settings = config.matches;
     let tactical_panel = config.tactics.as_ref().unwrap_or(&settings.evaluation);
     for panel in [&settings.evaluation, tactical_panel] {
@@ -95,6 +107,7 @@ pub fn run(input: &Path, config: &Path, backend: Option<Backend>, options: Optio
             .and_then(Path::parent)
     };
     let checkpoints = checkpoints(input, run, is_run)?;
+    let checkpoints = sample_checkpoints(checkpoints, checkpoint_percent);
     let backend = backend
         .or(settings.inference_device)
         .unwrap_or(settings.device);
@@ -182,6 +195,7 @@ pub fn run(input: &Path, config: &Path, backend: Option<Backend>, options: Optio
         "action_limit": settings.action_limit,
         "evaluation_panel": settings.evaluation,
         "tactics_panel": tactical_panel,
+        "checkpoint_percent": checkpoint_percent,
         "checkpoints": results,
     }))?;
     fs::write(directory.join("summary.json"), format!("{report}\n"))?;
@@ -268,6 +282,47 @@ fn checkpoints(input: &Path, run: Option<&Path>, is_run: bool) -> Result<Vec<Wei
     Ok(weights)
 }
 
+fn sample_checkpoints(weights: Vec<Weights>, percent: u8) -> Vec<Weights> {
+    if percent == 100 || weights.len() < 2 {
+        return weights;
+    }
+
+    let decisions: Option<Vec<_>> = weights
+        .iter()
+        .map(|checkpoint| checkpoint.decisions)
+        .collect();
+    let positions = decisions
+        .filter(|decisions| decisions.is_sorted())
+        .unwrap_or_else(|| {
+            weights
+                .iter()
+                .map(|checkpoint| checkpoint.episode.unwrap())
+                .collect()
+        });
+
+    let last = weights.len() - 1;
+    let targets = sampling::targets(
+        positions[0],
+        positions[last],
+        weights.len(),
+        usize::from(percent),
+    );
+    let mut selected = BTreeSet::from([0, last]);
+    if targets.len() > 2 {
+        selected.extend(
+            targets[1..targets.len() - 1]
+                .iter()
+                .filter_map(|&target| sampling::nearest_index(positions.iter().copied(), target)),
+        );
+    }
+
+    weights
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, checkpoint)| selected.contains(&index).then_some(checkpoint))
+        .collect()
+}
+
 fn write_figures(directory: &Path, input: &Path, deals: usize, rows: &[Evaluated]) -> Result<()> {
     let axis = if rows.iter().all(|row| row.checkpoint.decisions.is_some()) {
         Axis::Decisions
@@ -320,4 +375,35 @@ fn write_figures(directory: &Path, input: &Path, deals: usize, rows: &[Evaluated
         "Tactical action ranked first",
         &[series(|row, panel| row.tactics[panel].rate())],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn samples_by_decisions_or_falls_back_to_episodes() {
+        let selected_episodes = |decisions: [Option<usize>; 5], percent| {
+            let weights = decisions
+                .into_iter()
+                .enumerate()
+                .map(|(episode, decisions)| Weights {
+                    path: PathBuf::new(),
+                    episode: Some(episode),
+                    decisions,
+                })
+                .collect();
+            sample_checkpoints(weights, percent)
+                .into_iter()
+                .map(|checkpoint| checkpoint.episode.unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        let decisions = [Some(0), Some(40), Some(60), Some(62), Some(100)];
+        assert_eq!(selected_episodes(decisions, 60), [0, 1, 4]);
+        assert_eq!(selected_episodes(decisions, 1), [0, 4]);
+        assert_eq!(selected_episodes(decisions, 100), [0, 1, 2, 3, 4]);
+        assert_eq!(selected_episodes([None; 5], 60), [0, 2, 4]);
+        assert_eq!(selected_episodes([Some(0); 5], 60), [0, 4]);
+    }
 }

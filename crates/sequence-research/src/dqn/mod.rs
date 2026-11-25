@@ -1,7 +1,8 @@
 mod evaluation;
 mod figures;
-mod model;
+pub(crate) mod model;
 mod observation;
+mod sampling;
 mod snapshot;
 pub mod suite;
 mod tactics;

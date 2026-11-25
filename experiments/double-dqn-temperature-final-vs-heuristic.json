@@ -1,0 +1,8 @@
+{
+  "policies": ["dqn", "heuristic"],
+  "checkpoint": "../results/experiments/double-dqn-temperature-full/seed-42/checkpoints/episode-110080.bpk",
+  "first_shuffle_seed": 12000000,
+  "deal_count": 256,
+  "policy_seed": 2042,
+  "action_limit": 512
+}
